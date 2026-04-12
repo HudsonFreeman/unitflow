@@ -1,10 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { Suspense, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { supabaseClient } from "@/lib/supabase-client"
 
-export default function LoginPage() {
+function LoginInner() {
   const searchParams = useSearchParams()
 
   const inviteToken = searchParams.get("inviteToken") ?? ""
@@ -160,5 +160,13 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="text-white p-6">Loading...</div>}>
+      <LoginInner />
+    </Suspense>
   )
 }
