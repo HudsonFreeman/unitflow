@@ -41,6 +41,31 @@ export default function AppLayout({
 
       setUserEmail(user.email ?? "")
 
+      // 🔥 NEW: PROFILE CHECK (THIS IS THE FIX)
+      const { data: profile, error: profileError } = await supabaseClient
+        .from("profiles")
+        .select("user_id")
+        .eq("user_id", user.id)
+        .maybeSingle()
+
+      if (profileError) {
+        router.replace("/login")
+        return
+      }
+
+      // ❌ No profile → force create profile
+      if (!profile && pathname !== "/create-profile") {
+        router.replace("/create-profile")
+        return
+      }
+
+      // ✅ Has profile but tries to go back → block it
+      if (profile && pathname === "/create-profile") {
+        router.replace("/dashboard")
+        return
+      }
+
+      // 🔥 EXISTING ORG LOGIC
       const context = await getActiveOrganizationContext()
 
       if (context.error) {
@@ -61,7 +86,7 @@ export default function AppLayout({
     }
 
     guardApp()
-  }, [router])
+  }, [router, pathname])
 
   async function handleSignOut() {
     await supabaseClient.auth.signOut()
@@ -186,55 +211,30 @@ export default function AppLayout({
 
               <nav className="mt-6 space-y-2">
                 <Link href="/dashboard" className={getLinkClasses("/dashboard")}>
-                  <div className="flex items-center justify-between">
-                    <span>Dashboard</span>
-                    <span className="text-xs text-zinc-500 group-hover:text-zinc-300">
-                      →
-                    </span>
-                  </div>
+                  <span>Dashboard</span>
                 </Link>
 
                 <Link href="/properties" className={getLinkClasses("/properties")}>
-                  <div className="flex items-center justify-between">
-                    <span>Properties</span>
-                    <span className="text-xs text-zinc-500 group-hover:text-zinc-300">
-                      →
-                    </span>
-                  </div>
+                  <span>Properties</span>
                 </Link>
 
                 <Link href="/tenants" className={getLinkClasses("/tenants")}>
-                  <div className="flex items-center justify-between">
-                    <span>Tenants</span>
-                    <span className="text-xs text-zinc-500 group-hover:text-zinc-300">
-                      →
-                    </span>
-                  </div>
+                  <span>Tenants</span>
                 </Link>
 
                 <Link href="/transfers" className={getLinkClasses("/transfers")}>
-                  <div className="flex items-center justify-between">
-                    <span>Transfers</span>
-                    <span className="text-xs text-zinc-500 group-hover:text-zinc-300">
-                      →
-                    </span>
-                  </div>
+                  <span>Transfers</span>
                 </Link>
 
                 <Link href="/team" className={getLinkClasses("/team")}>
-                  <div className="flex items-center justify-between">
-                    <span>Team</span>
-                    <span className="text-xs text-zinc-500 group-hover:text-zinc-300">
-                      →
-                    </span>
-                  </div>
+                  <span>Team</span>
                 </Link>
               </nav>
 
               <button
                 type="button"
                 onClick={handleSignOut}
-                className="mt-6 w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300 transition hover:bg-white/[0.06] hover:text-white active:scale-[0.99]"
+                className="mt-6 w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300 transition hover:bg-white/[0.06] hover:text-white"
               >
                 Sign Out
               </button>
