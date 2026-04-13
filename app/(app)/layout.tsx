@@ -22,7 +22,6 @@ export default function AppLayout({
   const [loading, setLoading] = useState(true)
   const [switchingOrg, setSwitchingOrg] = useState(false)
   const [userEmail, setUserEmail] = useState("")
-  const [role, setRole] = useState("")
   const [organizationId, setOrganizationId] = useState("")
   const [organizations, setOrganizations] = useState<OrganizationRow[]>([])
   const [memberships, setMemberships] = useState<OrganizationMemberRow[]>([])
@@ -41,7 +40,6 @@ export default function AppLayout({
 
       setUserEmail(user.email ?? "")
 
-      // 🔥 NEW: PROFILE CHECK (THIS IS THE FIX)
       const { data: profile, error: profileError } = await supabaseClient
         .from("profiles")
         .select("user_id")
@@ -53,19 +51,16 @@ export default function AppLayout({
         return
       }
 
-      // ❌ No profile → force create profile
       if (!profile && pathname !== "/create-profile") {
         router.replace("/create-profile")
         return
       }
 
-      // ✅ Has profile but tries to go back → block it
       if (profile && pathname === "/create-profile") {
         router.replace("/dashboard")
         return
       }
 
-      // 🔥 EXISTING ORG LOGIC
       const context = await getActiveOrganizationContext()
 
       if (context.error) {
@@ -78,7 +73,6 @@ export default function AppLayout({
         return
       }
 
-      setRole(context.membership.role)
       setOrganizationId(context.activeOrganizationId)
       setOrganizations(context.organizations)
       setMemberships(context.memberships)
@@ -105,12 +99,7 @@ export default function AppLayout({
       return
     }
 
-    const nextMembership = memberships.find(
-      (membership) => membership.organization_id === nextOrganizationId
-    )
-
     setOrganizationId(nextOrganizationId)
-    setRole(nextMembership?.role ?? "")
     setSwitchingOrg(false)
     router.refresh()
     window.location.href = pathname
@@ -146,19 +135,13 @@ export default function AppLayout({
         <aside className="w-80 border-r border-white/10 bg-black/30 backdrop-blur-xl">
           <div className="sticky top-0 p-6">
             <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6 shadow-[0_0_30px_rgba(0,0,0,0.35)]">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.25em] text-zinc-500">
-                    Platform
-                  </p>
-                  <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-                    UnitFlow
-                  </h1>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-white/[0.05] px-3 py-2 text-xs text-zinc-300">
-                  {role}
-                </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.25em] text-zinc-500">
+                  Platform
+                </p>
+                <h1 className="mt-2 text-3xl font-semibold tracking-tight">
+                  UnitFlow
+                </h1>
               </div>
 
               <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -187,18 +170,11 @@ export default function AppLayout({
                   disabled={switchingOrg}
                   className="mt-2 w-full rounded-xl bg-black p-2 text-sm text-white"
                 >
-                  {organizations.map((organization) => {
-                    const membership = memberships.find(
-                      (item) => item.organization_id === organization.id
-                    )
-
-                    return (
-                      <option key={organization.id} value={organization.id}>
-                        {organization.name}
-                        {membership?.role ? ` — ${membership.role}` : ""}
-                      </option>
-                    )
-                  })}
+                  {organizations.map((organization) => (
+                    <option key={organization.id} value={organization.id}>
+                      {organization.name}
+                    </option>
+                  ))}
                 </select>
 
                 <p className="mt-4 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
@@ -224,10 +200,6 @@ export default function AppLayout({
 
                 <Link href="/transfers" className={getLinkClasses("/transfers")}>
                   <span>Transfers</span>
-                </Link>
-
-                <Link href="/team" className={getLinkClasses("/team")}>
-                  <span>Team</span>
                 </Link>
               </nav>
 
