@@ -30,6 +30,16 @@ function formatUnitStatus(status?: string | null) {
   return status.replaceAll("_", " ")
 }
 
+function normalizeUnitStatus(status?: string | null) {
+  const normalized = (status ?? "vacant").trim().toLowerCase()
+
+  if (["vacant", "occupied", "notice", "make_ready"].includes(normalized)) {
+    return normalized
+  }
+
+  return "vacant"
+}
+
 function getStatusClasses(status?: string | null) {
   switch ((status ?? "").toLowerCase()) {
     case "occupied":
@@ -70,10 +80,62 @@ function getPropertyHealthLabel(
   }
 }
 
+function padUnitNumber(value: number, width: number) {
+  return String(value).padStart(width, "0")
+}
+
+function parseCsvText(csvText: string) {
+  const lines = csvText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (lines.length === 0) {
+    return {
+      rows: [] as Array<{ unit_number: string; status: string }>,
+      error: "CSV file is empty.",
+    }
+  }
+
+  const header = lines[0]
+    .split(",")
+    .map((cell) => cell.trim().toLowerCase())
+
+  const unitNumberIndex = header.indexOf("unit_number")
+  const statusIndex = header.indexOf("status")
+
+  if (unitNumberIndex === -1) {
+    return {
+      rows: [] as Array<{ unit_number: string; status: string }>,
+      error: 'CSV must include a "unit_number" column.',
+    }
+  }
+
+  const rows: Array<{ unit_number: string; status: string }> = []
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const rawCells = lines[i].split(",").map((cell) => cell.trim())
+
+    const unitNumber = rawCells[unitNumberIndex] ?? ""
+    const status = statusIndex === -1 ? "vacant" : rawCells[statusIndex] ?? "vacant"
+
+    if (!unitNumber) continue
+
+    rows.push({
+      unit_number: unitNumber,
+      status: normalizeUnitStatus(status),
+    })
+  }
+
+  return { rows, error: "" }
+}
+
 export default function PropertiesPage() {
   const [loading, setLoading] = useState(true)
   const [submittingProperty, setSubmittingProperty] = useState(false)
   const [submittingUnit, setSubmittingUnit] = useState(false)
+  const [submittingBulkUnits, setSubmittingBulkUnits] = useState(false)
+  const [submittingCsvUnits, setSubmittingCsvUnits] = useState(false)
   const [errorMessage, setErrorMessage] = useState("")
   const [toast, setToast] = useState<ToastState>(null)
 
@@ -86,6 +148,14 @@ export default function PropertiesPage() {
   const [selectedPropertyId, setSelectedPropertyId] = useState("")
   const [unitNumber, setUnitNumber] = useState("")
   const [unitStatus, setUnitStatus] = useState("vacant")
+
+  const [bulkPropertyId, setBulkPropertyId] = useState("")
+  const [bulkStartUnit, setBulkStartUnit] = useState("")
+  const [bulkEndUnit, setBulkEndUnit] = useState("")
+  const [bulkStatus, setBulkStatus] = useState("vacant")
+
+  const [csvPropertyId, setCsvPropertyId] = useState("")
+  const [csvFile, setCsvFile] = useState<File | null>(null)
 
   function clearMessages() {
     setErrorMessage("")
@@ -165,14 +235,24 @@ export default function PropertiesPage() {
     setProperties(nextProperties)
     setUnits(nextUnits)
 
-    setSelectedPropertyId((currentSelectedPropertyId) => {
-      if (
-        currentSelectedPropertyId &&
-        nextProperties.some((property) => property.id === currentSelectedPropertyId)
-      ) {
-        return currentSelectedPropertyId
+    setSelectedPropertyId((current) => {
+      if (current && nextProperties.some((property) => property.id === current)) {
+        return current
       }
+      return nextProperties[0]?.id ?? ""
+    })
 
+    setBulkPropertyId((current) => {
+      if (current && nextProperties.some((property) => property.id === current)) {
+        return current
+      }
+      return nextProperties[0]?.id ?? ""
+    })
+
+    setCsvPropertyId((current) => {
+      if (current && nextProperties.some((property) => property.id === current)) {
+        return current
+      }
       return nextProperties[0]?.id ?? ""
     })
 
@@ -310,6 +390,8 @@ export default function PropertiesPage() {
         [...current, createdProperty].sort((a, b) => a.name.localeCompare(b.name))
       )
       setSelectedPropertyId(createdProperty.id)
+      setBulkPropertyId(createdProperty.id)
+      setCsvPropertyId(createdProperty.id)
     } else {
       await loadPropertiesPage()
     }
@@ -375,7 +457,7 @@ export default function PropertiesPage() {
 
     if (createdUnit) {
       setUnits((current) =>
-        [...current].concat(createdUnit).sort((a, b) =>
+        [...current, createdUnit].sort((a, b) =>
           a.unit_number.localeCompare(b.unit_number, undefined, {
             numeric: true,
             sensitivity: "base",
@@ -390,6 +472,272 @@ export default function PropertiesPage() {
     setUnitStatus("vacant")
     setSubmittingUnit(false)
     showToast("Unit created.", "success")
+  }
+
+  async function handleBulkCreateUnits(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    clearMessages()
+
+    if (!organizationId) {
+      setErrorMessage("Organization not loaded yet.")
+      return
+    }
+
+    if (!bulkPropertyId) {
+      setErrorMessage("Select a property for bulk creation.")
+      return
+    }
+
+    const startValue = bulkStartUnit.trim()
+    const endValue = bulkEndUnit.trim()
+
+    if (!startValue || !endValue) {
+      setErrorMessage("Start unit and end unit are required.")
+      return
+    }
+
+    if (!/^\d+$/.test(startValue) || !/^\d+$/.test(endValue)) {
+      setErrorMessage("Bulk unit creation currently supports numbers only, like 001 to 200.")
+      return
+    }
+
+    const startNumber = Number(startValue)
+    const endNumber = Number(endValue)
+
+    if (!Number.isInteger(startNumber) || !Number.isInteger(endNumber)) {
+      setErrorMessage("Start and end units must be whole numbers.")
+      return
+    }
+
+    if (startNumber <= 0 || endNumber <= 0) {
+      setErrorMessage("Start and end units must be greater than 0.")
+      return
+    }
+
+    if (endNumber < startNumber) {
+      setErrorMessage("End unit must be greater than or equal to start unit.")
+      return
+    }
+
+    const totalToCreate = endNumber - startNumber + 1
+
+    if (totalToCreate > 1000) {
+      setErrorMessage("For now, bulk creation is limited to 1000 units at once.")
+      return
+    }
+
+    const padWidth = Math.max(startValue.length, endValue.length)
+
+    const existingUnitNumbers = new Set(
+      units
+        .filter((unit) => unit.property_id === bulkPropertyId)
+        .map((unit) => unit.unit_number.trim().toLowerCase())
+    )
+
+    const newUnitsPayload: Array<{
+      organization_id: string
+      property_id: string
+      unit_number: string
+      status: string
+    }> = []
+
+    const duplicateNumbers: string[] = []
+
+    for (let i = startNumber; i <= endNumber; i += 1) {
+      const generatedUnitNumber = padUnitNumber(i, padWidth)
+      const normalizedUnitNumber = generatedUnitNumber.toLowerCase()
+
+      if (existingUnitNumbers.has(normalizedUnitNumber)) {
+        duplicateNumbers.push(generatedUnitNumber)
+        continue
+      }
+
+      newUnitsPayload.push({
+        organization_id: organizationId,
+        property_id: bulkPropertyId,
+        unit_number: generatedUnitNumber,
+        status: bulkStatus,
+      })
+    }
+
+    if (newUnitsPayload.length === 0) {
+      setErrorMessage(
+        duplicateNumbers.length > 0
+          ? "No units created. All units in that range already exist."
+          : "No units to create."
+      )
+      return
+    }
+
+    setSubmittingBulkUnits(true)
+
+    const { data, error } = await supabaseClient
+      .from("units")
+      .insert(newUnitsPayload)
+      .select("id, unit_number, property_id, organization_id, status")
+
+    if (error) {
+      setErrorMessage(error.message)
+      setSubmittingBulkUnits(false)
+      return
+    }
+
+    const createdUnits = (data ?? []) as UnitRow[]
+
+    if (createdUnits.length > 0) {
+      setUnits((current) =>
+        [...current, ...createdUnits].sort((a, b) =>
+          a.unit_number.localeCompare(b.unit_number, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          })
+        )
+      )
+    } else {
+      await loadPropertiesPage()
+    }
+
+    setBulkStartUnit("")
+    setBulkEndUnit("")
+    setBulkStatus("vacant")
+    setSubmittingBulkUnits(false)
+
+    if (duplicateNumbers.length > 0) {
+      showToast(
+        `Created ${createdUnits.length} units. Skipped ${duplicateNumbers.length} duplicates.`,
+        "success"
+      )
+    } else {
+      showToast(`Created ${createdUnits.length} units.`, "success")
+    }
+  }
+
+  async function handleCsvUpload(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    clearMessages()
+
+    if (!organizationId) {
+      setErrorMessage("Organization not loaded yet.")
+      return
+    }
+
+    if (!csvPropertyId) {
+      setErrorMessage("Select a property for CSV upload.")
+      return
+    }
+
+    if (!csvFile) {
+      setErrorMessage("Choose a CSV file first.")
+      return
+    }
+
+    setSubmittingCsvUnits(true)
+
+    try {
+      const csvText = await csvFile.text()
+      const parsed = parseCsvText(csvText)
+
+      if (parsed.error) {
+        setErrorMessage(parsed.error)
+        setSubmittingCsvUnits(false)
+        return
+      }
+
+      if (parsed.rows.length === 0) {
+        setErrorMessage("No valid rows found in the CSV.")
+        setSubmittingCsvUnits(false)
+        return
+      }
+
+      const existingUnitNumbers = new Set(
+        units
+          .filter((unit) => unit.property_id === csvPropertyId)
+          .map((unit) => unit.unit_number.trim().toLowerCase())
+      )
+
+      const seenInFile = new Set<string>()
+      const duplicates: string[] = []
+      const payload: Array<{
+        organization_id: string
+        property_id: string
+        unit_number: string
+        status: string
+      }> = []
+
+      for (const row of parsed.rows) {
+        const normalizedUnitNumber = row.unit_number.trim().toLowerCase()
+
+        if (!normalizedUnitNumber) continue
+
+        if (existingUnitNumbers.has(normalizedUnitNumber) || seenInFile.has(normalizedUnitNumber)) {
+          duplicates.push(row.unit_number)
+          continue
+        }
+
+        seenInFile.add(normalizedUnitNumber)
+
+        payload.push({
+          organization_id: organizationId,
+          property_id: csvPropertyId,
+          unit_number: row.unit_number.trim(),
+          status: normalizeUnitStatus(row.status),
+        })
+      }
+
+      if (payload.length === 0) {
+        setErrorMessage(
+          duplicates.length > 0
+            ? "No units created. All CSV units already exist or were duplicated."
+            : "No valid units found to import."
+        )
+        setSubmittingCsvUnits(false)
+        return
+      }
+
+      const { data, error } = await supabaseClient
+        .from("units")
+        .insert(payload)
+        .select("id, unit_number, property_id, organization_id, status")
+
+      if (error) {
+        setErrorMessage(error.message)
+        setSubmittingCsvUnits(false)
+        return
+      }
+
+      const createdUnits = (data ?? []) as UnitRow[]
+
+      if (createdUnits.length > 0) {
+        setUnits((current) =>
+          [...current, ...createdUnits].sort((a, b) =>
+            a.unit_number.localeCompare(b.unit_number, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            })
+          )
+        )
+      } else {
+        await loadPropertiesPage()
+      }
+
+      setCsvFile(null)
+      const fileInput = document.getElementById("units-csv-upload") as HTMLInputElement | null
+      if (fileInput) fileInput.value = ""
+
+      setSubmittingCsvUnits(false)
+
+      if (duplicates.length > 0) {
+        showToast(
+          `Imported ${createdUnits.length} units. Skipped ${duplicates.length} duplicates.`,
+          "success"
+        )
+      } else {
+        showToast(`Imported ${createdUnits.length} units.`, "success")
+      }
+    } catch {
+      setErrorMessage("Failed to read the CSV file.")
+      setSubmittingCsvUnits(false)
+    }
   }
 
   if (loading) {
@@ -428,14 +776,16 @@ export default function PropertiesPage() {
 
       <h1 className="text-3xl font-semibold">Properties</h1>
       <p className="mt-2 text-zinc-400">
-        Create properties and units for your active organization.
+        Manage your portfolio and identify where vacancy risk is building.
       </p>
 
       <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
-        <p className="text-sm text-zinc-400">Organization ID</p>
-        <p className="mt-1 break-all text-sm text-zinc-200">{organizationId}</p>
-        <p className="mt-3 text-sm text-zinc-400">Role</p>
+        <p className="text-sm text-zinc-400">Signed-in role</p>
         <p className="mt-1 text-sm capitalize text-zinc-200">{role}</p>
+        <p className="mt-3 text-sm text-zinc-400">Portfolio scope</p>
+        <p className="mt-1 text-sm text-zinc-200">
+          Properties and units shown here belong only to your active organization.
+        </p>
       </div>
 
       {errorMessage ? (
@@ -478,7 +828,13 @@ export default function PropertiesPage() {
 
       <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="rounded-xl border border-white/10 bg-white/5 p-6">
-          <h2 className="text-xl font-semibold">Create Property</h2>
+          <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+            Setup / Add Inventory
+          </p>
+          <h2 className="mt-2 text-xl font-semibold">Add New Property</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Start building your portfolio structure.
+          </p>
 
           <form onSubmit={handleCreateProperty} className="mt-4 space-y-4">
             <div>
@@ -504,7 +860,13 @@ export default function PropertiesPage() {
         </div>
 
         <div className="rounded-xl border border-white/10 bg-white/5 p-6">
-          <h2 className="text-xl font-semibold">Create Unit</h2>
+          <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+            Setup / Add Inventory
+          </p>
+          <h2 className="mt-2 text-xl font-semibold">Add Single Unit</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Add one unit manually when you only need a single record.
+          </p>
 
           <form onSubmit={handleCreateUnit} className="mt-4 space-y-4">
             <div>
@@ -562,6 +924,151 @@ export default function PropertiesPage() {
               className="w-full rounded bg-blue-600 p-2 hover:bg-blue-700 disabled:opacity-60"
             >
               {submittingUnit ? "Creating..." : "Create Unit"}
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-xl border border-white/10 bg-white/5 p-6">
+          <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+            Bulk Inventory Setup
+          </p>
+          <h2 className="mt-2 text-xl font-semibold">Bulk Create Units</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Generate sequential unit ranges fast. Example: 001 to 200.
+          </p>
+
+          <form
+            onSubmit={handleBulkCreateUnits}
+            className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2"
+          >
+            <div className="md:col-span-2">
+              <label className="mb-1 block text-sm text-zinc-400">Property</label>
+              <select
+                value={bulkPropertyId}
+                onChange={(e) => setBulkPropertyId(e.target.value)}
+                className="w-full rounded bg-black p-2"
+                disabled={properties.length === 0}
+              >
+                <option value="">
+                  {properties.length === 0
+                    ? "Create a property first"
+                    : "Select Property"}
+                </option>
+                {properties.map((property) => (
+                  <option key={property.id} value={property.id}>
+                    {property.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm text-zinc-400">Start Unit</label>
+              <input
+                value={bulkStartUnit}
+                onChange={(e) => setBulkStartUnit(e.target.value)}
+                placeholder="001"
+                className="w-full rounded bg-black p-2"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm text-zinc-400">End Unit</label>
+              <input
+                value={bulkEndUnit}
+                onChange={(e) => setBulkEndUnit(e.target.value)}
+                placeholder="200"
+                className="w-full rounded bg-black p-2"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="mb-1 block text-sm text-zinc-400">Starting Status</label>
+              <select
+                value={bulkStatus}
+                onChange={(e) => setBulkStatus(e.target.value)}
+                className="w-full rounded bg-black p-2"
+              >
+                <option value="vacant">vacant</option>
+                <option value="make_ready">make_ready</option>
+                <option value="notice">notice</option>
+                <option value="occupied">occupied</option>
+              </select>
+            </div>
+
+            <div className="md:col-span-2">
+              <button
+                type="submit"
+                disabled={submittingBulkUnits || properties.length === 0}
+                className="w-full rounded bg-blue-600 p-2 hover:bg-blue-700 disabled:opacity-60"
+              >
+                {submittingBulkUnits ? "Generating Units..." : "Generate Units"}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div className="rounded-xl border border-white/10 bg-white/5 p-6">
+          <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+            Bulk Inventory Setup
+          </p>
+          <h2 className="mt-2 text-xl font-semibold">Upload Units CSV</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Import mixed unit numbers from a CSV file. Best for large existing properties.
+          </p>
+
+          <form onSubmit={handleCsvUpload} className="mt-4 space-y-4">
+            <div>
+              <label className="mb-1 block text-sm text-zinc-400">Property</label>
+              <select
+                value={csvPropertyId}
+                onChange={(e) => setCsvPropertyId(e.target.value)}
+                className="w-full rounded bg-black p-2"
+                disabled={properties.length === 0}
+              >
+                <option value="">
+                  {properties.length === 0
+                    ? "Create a property first"
+                    : "Select Property"}
+                </option>
+                {properties.map((property) => (
+                  <option key={property.id} value={property.id}>
+                    {property.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm text-zinc-400">CSV File</label>
+              <input
+                id="units-csv-upload"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
+                className="w-full rounded bg-black p-2 file:mr-3 file:rounded file:border-0 file:bg-zinc-800 file:px-3 file:py-2 file:text-sm file:text-white"
+              />
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
+              CSV format:
+              <pre className="mt-2 overflow-x-auto text-xs text-zinc-300">
+{`unit_number,status
+101,vacant
+102,occupied
+103,notice
+104,make_ready`}
+              </pre>
+            </div>
+
+            <button
+              type="submit"
+              disabled={submittingCsvUnits || properties.length === 0}
+              className="w-full rounded bg-blue-600 p-2 hover:bg-blue-700 disabled:opacity-60"
+            >
+              {submittingCsvUnits ? "Uploading CSV..." : "Import CSV Units"}
             </button>
           </form>
         </div>
@@ -661,10 +1168,6 @@ export default function PropertiesPage() {
                       ))
                     )}
                   </div>
-                </div>
-
-                <div className="mt-4 text-right text-xs text-zinc-500">
-                  Property ID: {property.id}
                 </div>
               </div>
             )

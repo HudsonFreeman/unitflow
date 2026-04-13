@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { getCurrentMembership } from "@/lib/current-membership"
 import { supabaseClient } from "@/lib/supabase-client"
 
@@ -10,6 +10,12 @@ type MemberRow = {
   organization_id: string
   role: string
   created_at: string
+  full_name: string | null
+}
+
+type ProfileRow = {
+  user_id: string
+  full_name: string | null
 }
 
 type InviteRow = {
@@ -23,7 +29,59 @@ type InviteRow = {
   accepted: boolean
 }
 
-const roleOptions = ["manager", "leasing", "staff"] as const
+const roleOptions = ["manager", "staff"] as const
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function formatShortDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString()
+}
+
+function getInviteStatus(invite: InviteRow) {
+  if (invite.accepted) return "accepted"
+  if (new Date(invite.expires_at) < new Date()) return "expired"
+  return "pending"
+}
+
+function getDaysUntilExpiry(value: string) {
+  const now = new Date()
+  const expires = new Date(value)
+
+  if (Number.isNaN(expires.getTime())) return null
+
+  const nowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const expiresStart = new Date(
+    expires.getFullYear(),
+    expires.getMonth(),
+    expires.getDate()
+  )
+
+  const diffMs = expiresStart.getTime() - nowStart.getTime()
+  return Math.round(diffMs / (1000 * 60 * 60 * 24))
+}
+
+function getRoleDescription(role: string) {
+  switch (role.toLowerCase()) {
+    case "manager":
+      return "Full control over properties, tenants, transfers, and team access"
+    case "staff":
+      return "Can view the team and help with day-to-day operational work"
+    default:
+      return "Organization role"
+  }
+}
+
+function getMemberLabel(member: MemberRow, isSelf: boolean) {
+  if (isSelf) return "You"
+  if (member.full_name?.trim()) return member.full_name.trim()
+  return "Unnamed User"
+}
 
 export default function TeamPage() {
   const [members, setMembers] = useState<MemberRow[]>([])
@@ -43,62 +101,104 @@ export default function TeamPage() {
 
   const isManager = role.toLowerCase() === "manager"
 
-  useEffect(() => {
-    async function loadTeam() {
-      setLoading(true)
-      setError("")
-      setSuccessMessage("")
+  async function loadTeam() {
+    setLoading(true)
+    setError("")
+    setSuccessMessage("")
 
-      const { userId, membership, error: membershipError } =
-        await getCurrentMembership()
+    const { userId, membership, error: membershipError } =
+      await getCurrentMembership()
 
-      if (membershipError || !membership || !userId) {
-        setError("Failed to load membership.")
-        setLoading(false)
-        return
-      }
-
-      setCurrentUserId(userId)
-      setRole(membership.role)
-      setOrganizationId(membership.organization_id)
-
-      const [
-        { data: memberData, error: memberError },
-        { data: inviteData, error: inviteError },
-      ] = await Promise.all([
-        supabaseClient
-          .from("organization_members")
-          .select("id, user_id, organization_id, role, created_at")
-          .eq("organization_id", membership.organization_id)
-          .order("created_at", { ascending: true }),
-        supabaseClient
-          .from("organization_invites")
-          .select(
-            "id, organization_id, email, role, token, created_at, expires_at, accepted"
-          )
-          .eq("organization_id", membership.organization_id)
-          .order("created_at", { ascending: false }),
-      ])
-
-      if (memberError) {
-        setError(memberError.message)
-        setLoading(false)
-        return
-      }
-
-      if (inviteError) {
-        setError(inviteError.message)
-        setLoading(false)
-        return
-      }
-
-      setMembers((memberData ?? []) as MemberRow[])
-      setInvites((inviteData ?? []) as InviteRow[])
+    if (membershipError || !membership || !userId) {
+      setError("Failed to load membership.")
       setLoading(false)
+      return
     }
 
+    setCurrentUserId(userId)
+    setRole(membership.role)
+    setOrganizationId(membership.organization_id)
+
+    const [
+      { data: memberData, error: memberError },
+      { data: inviteData, error: inviteError },
+    ] = await Promise.all([
+      supabaseClient
+        .from("organization_members")
+        .select("id, user_id, organization_id, role, created_at")
+        .eq("organization_id", membership.organization_id)
+        .order("created_at", { ascending: true }),
+      supabaseClient
+        .from("organization_invites")
+        .select(
+          "id, organization_id, email, role, token, created_at, expires_at, accepted"
+        )
+        .eq("organization_id", membership.organization_id)
+        .order("created_at", { ascending: false }),
+    ])
+
+    if (memberError) {
+      setError(memberError.message)
+      setLoading(false)
+      return
+    }
+
+    if (inviteError) {
+      setError(inviteError.message)
+      setLoading(false)
+      return
+    }
+
+    const rawMembers = (memberData ?? []) as Array<{
+      id: string
+      user_id: string
+      organization_id: string
+      role: string
+      created_at: string
+    }>
+
+    const userIds = rawMembers.map((member) => member.user_id)
+
+    const profilesMap = new Map<string, string | null>()
+
+    if (userIds.length > 0) {
+      const { data: profilesData, error: profilesError } = await supabaseClient
+        .from("profiles")
+        .select("user_id, full_name")
+        .in("user_id", userIds)
+
+      if (profilesError) {
+        setError(profilesError.message)
+        setLoading(false)
+        return
+      }
+
+      for (const profile of (profilesData ?? []) as ProfileRow[]) {
+        profilesMap.set(profile.user_id, profile.full_name)
+      }
+    }
+
+    const mergedMembers: MemberRow[] = rawMembers.map((member) => ({
+      ...member,
+      full_name: profilesMap.get(member.user_id) ?? null,
+    }))
+
+    setMembers(mergedMembers)
+
+    // only show pending invites in invite section
+    const pendingInvites = ((inviteData ?? []) as InviteRow[]).filter(
+      (invite) => getInviteStatus(invite) === "pending"
+    )
+    setInvites(pendingInvites)
+
+    setLoading(false)
+  }
+
+  useEffect(() => {
     loadTeam()
   }, [])
+
+  const pendingInviteCount = useMemo(() => invites.length, [invites])
 
   async function writeAuditLog(input: {
     action: string
@@ -206,7 +306,7 @@ export default function TeamPage() {
     }
 
     const confirmed = window.confirm(
-      "Remove this member from the organization?"
+      `Remove ${member.full_name?.trim() || "this member"} from the organization?`
     )
 
     if (!confirmed) return
@@ -258,12 +358,19 @@ export default function TeamPage() {
       return
     }
 
+    const existingMemberWithEmail = false
+
     const duplicatePendingInvite = invites.some(
       (invite) =>
         invite.email.toLowerCase() === cleanedEmail &&
         !invite.accepted &&
         new Date(invite.expires_at) > new Date()
     )
+
+    if (existingMemberWithEmail) {
+      setError("That user is already on the team.")
+      return
+    }
 
     if (duplicatePendingInvite) {
       setError("A pending invite already exists for that email.")
@@ -360,7 +467,7 @@ export default function TeamPage() {
       return
     }
 
-    const confirmed = window.confirm("Revoke this invite?")
+    const confirmed = window.confirm("Revoke this pending invite?")
 
     if (!confirmed) {
       setRemovingInviteId("")
@@ -395,18 +502,6 @@ export default function TeamPage() {
     setRemovingInviteId("")
   }
 
-  function formatDate(value: string) {
-    const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return value
-    return date.toLocaleString()
-  }
-
-  function getInviteStatus(invite: InviteRow) {
-    if (invite.accepted) return "accepted"
-    if (new Date(invite.expires_at) < new Date()) return "expired"
-    return "pending"
-  }
-
   if (loading) {
     return <p className="text-zinc-400">Loading team...</p>
   }
@@ -418,14 +513,38 @@ export default function TeamPage() {
   return (
     <div>
       <h1 className="text-3xl font-semibold">Team</h1>
-      <p className="mt-2 text-zinc-400">Manage your organization members.</p>
+      <p className="mt-2 text-zinc-400">
+        Only members of your organization can access this portfolio.
+      </p>
 
       <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
-        <p className="text-sm text-zinc-400">Signed-in role</p>
-        <p className="mt-1 text-sm capitalize text-zinc-200">{role}</p>
+        <p className="text-sm text-zinc-400">Organization Access</p>
+        <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div>
+            <p className="text-xs text-zinc-500">Organization</p>
+            <p className="mt-1 text-sm text-zinc-200 break-all">{organizationId}</p>
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500">Your Role</p>
+            <p className="mt-1 text-sm capitalize text-zinc-200">
+              {isManager ? "Manager • Full Access" : "Staff"}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500">Members</p>
+            <p className="mt-1 text-sm text-zinc-200">{members.length}</p>
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500">Pending Invites</p>
+            <p className="mt-1 text-sm text-zinc-200">{pendingInviteCount}</p>
+          </div>
+        </div>
 
         {!isManager ? (
-          <p className="mt-3 text-sm text-amber-300">
+          <p className="mt-4 text-sm text-amber-300">
             You can view the team, but only managers can make changes.
           </p>
         ) : null}
@@ -444,9 +563,12 @@ export default function TeamPage() {
       ) : null}
 
       <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4">
-        <p className="text-sm text-zinc-400">Invite team member</p>
+        <h2 className="text-xl font-semibold">Add a Team Member</h2>
+        <p className="mt-2 text-sm text-zinc-400">
+          Invite a manager or staff member into this organization.
+        </p>
 
-        <div className="mt-3 flex gap-2">
+        <div className="mt-4 flex gap-2">
           <input
             value={inviteEmail}
             onChange={(e) => setInviteEmail(e.target.value)}
@@ -461,8 +583,22 @@ export default function TeamPage() {
             disabled={!isManager || inviting}
             className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-60"
           >
-            {inviting ? "Sending..." : "Invite"}
+            {inviting ? "Sending..." : "Send Invite"}
           </button>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-4">
+          <p className="text-sm text-zinc-400">Role Access</p>
+          <div className="mt-3 space-y-2 text-sm text-zinc-300">
+            <p>
+              <span className="font-medium text-white">Manager</span> —{" "}
+              {getRoleDescription("manager")}
+            </p>
+            <p>
+              <span className="font-medium text-white">Staff</span> —{" "}
+              {getRoleDescription("staff")}
+            </p>
+          </div>
         </div>
 
         {latestInviteLink ? (
@@ -486,7 +622,7 @@ export default function TeamPage() {
           <div>
             <h2 className="text-xl font-semibold">Pending Invites</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              View, copy, and revoke organization invites.
+              Only invites still waiting for acceptance appear here.
             </p>
           </div>
 
@@ -497,12 +633,12 @@ export default function TeamPage() {
 
         <div className="mt-4 space-y-3">
           {invites.length === 0 ? (
-            <p className="text-sm text-zinc-400">No invites yet.</p>
+            <p className="text-sm text-zinc-400">No pending invites.</p>
           ) : (
             invites.map((invite) => {
-              const inviteStatus = getInviteStatus(invite)
               const inviteLink = `${window.location.origin}/accept-invite/${invite.token}`
               const isRemovingInvite = removingInviteId === invite.id
+              const daysUntilExpiry = getDaysUntilExpiry(invite.expires_at)
 
               return (
                 <div
@@ -511,58 +647,59 @@ export default function TeamPage() {
                 >
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm text-zinc-400">Email</p>
-                      <p className="break-all text-white">{invite.email}</p>
+                      <p className="text-white">{invite.email}</p>
 
                       <div className="mt-3 flex flex-wrap gap-2">
                         <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-sm capitalize text-zinc-200">
                           {invite.role}
                         </span>
 
-                        <span
-                          className={`rounded-full border px-3 py-1 text-sm capitalize ${
-                            inviteStatus === "pending"
-                              ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
-                              : inviteStatus === "accepted"
-                              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-                              : "border-red-500/20 bg-red-500/10 text-red-300"
-                          }`}
-                        >
-                          {inviteStatus}
+                        <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-sm capitalize text-amber-300">
+                          pending
                         </span>
                       </div>
 
                       <p className="mt-3 text-xs text-zinc-500">
-                        Created: {formatDate(invite.created_at)}
+                        Sent: {formatShortDate(invite.created_at)}
                       </p>
                       <p className="mt-1 text-xs text-zinc-500">
-                        Expires: {formatDate(invite.expires_at)}
+                        {daysUntilExpiry === null
+                          ? `Expires: ${formatDate(invite.expires_at)}`
+                          : daysUntilExpiry < 0
+                          ? "Invite expired"
+                          : `Expires in ${daysUntilExpiry} day${daysUntilExpiry === 1 ? "" : "s"}`}
                       </p>
 
-                      <p className="mt-3 text-xs text-zinc-400">Invite link</p>
-                      <p className="mt-1 break-all text-xs text-zinc-300">
-                        {inviteLink}
-                      </p>
+                      {isManager ? (
+                        <>
+                          <p className="mt-3 text-xs text-zinc-400">Invite link</p>
+                          <p className="mt-1 break-all text-xs text-zinc-300">
+                            {inviteLink}
+                          </p>
+                        </>
+                      ) : null}
                     </div>
 
-                    <div className="flex flex-col gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleCopyInviteLink(inviteLink)}
-                        className="rounded bg-zinc-700 px-3 py-2 text-sm text-white hover:bg-zinc-600"
-                      >
-                        Copy Link
-                      </button>
+                    {isManager ? (
+                      <div className="flex flex-col gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyInviteLink(inviteLink)}
+                          className="rounded bg-zinc-700 px-3 py-2 text-sm text-white hover:bg-zinc-600"
+                        >
+                          Copy Invite Link
+                        </button>
 
-                      <button
-                        type="button"
-                        onClick={() => handleRevokeInvite(invite.id)}
-                        disabled={!isManager || isRemovingInvite}
-                        className="rounded bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-60"
-                      >
-                        {isRemovingInvite ? "Revoking..." : "Revoke"}
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRevokeInvite(invite.id)}
+                          disabled={!isManager || isRemovingInvite}
+                          className="rounded bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-60"
+                        >
+                          {isRemovingInvite ? "Revoking..." : "Revoke Invite"}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               )
@@ -571,62 +708,107 @@ export default function TeamPage() {
         </div>
       </div>
 
-      <div className="mt-6 space-y-3">
-        {members.map((member) => {
-          const isSaving = savingMemberId === member.id
-          const isRemoving = removingMemberId === member.id
-          const isSelf = member.user_id === currentUserId
+      <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold">Team Members</h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              Everyone with real access to this organization appears here.
+            </p>
+          </div>
+        </div>
 
-          return (
-            <div
-              key={member.id}
-              className="rounded-xl border border-zinc-800 bg-zinc-900 p-4"
-            >
-              <p className="text-sm text-zinc-400">User ID</p>
-              <p className="break-all text-white">{member.user_id}</p>
+        <div className="mt-4 space-y-3">
+          {members.length === 0 ? (
+            <p className="text-zinc-400">No team members found.</p>
+          ) : (
+            members.map((member) => {
+              const isSaving = savingMemberId === member.id
+              const isRemoving = removingMemberId === member.id
+              const isSelf = member.user_id === currentUserId
 
-              <div className="mt-4">
-                <label className="mb-1 block text-sm text-zinc-400">Role</label>
-                <select
-                  value={member.role}
-                  onChange={(e) => handleRoleChange(member.id, e.target.value)}
-                  disabled={!isManager || isSaving || isRemoving}
-                  className="w-full rounded bg-black p-2 text-white"
+              return (
+                <div
+                  key={member.id}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900 p-4"
                 >
-                  {roleOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-white">
+                        {getMemberLabel(member, isSelf)}
+                        {isSelf ? (
+                          <span className="ml-2 text-sm text-zinc-400">
+                            ({member.role === "manager" ? "Manager" : "Staff"})
+                          </span>
+                        ) : null}
+                      </p>
 
-              <div className="mt-4 flex items-center justify-between gap-3">
-                <p className="text-xs text-zinc-500">
-                  {isSaving
-                    ? "Saving..."
-                    : isRemoving
-                    ? "Removing..."
-                    : "Created at: " + formatDate(member.created_at)}
-                </p>
+                      {isManager ? (
+                        <p className="mt-1 text-xs text-zinc-500 break-all">
+                          ID: {member.user_id}
+                        </p>
+                      ) : null}
 
-                <button
-                  type="button"
-                  onClick={() => handleRemoveMember(member.id)}
-                  disabled={!isManager || isSelf || isSaving || isRemoving}
-                  className="rounded bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-50"
-                >
-                  {isSelf ? "You" : isRemoving ? "Removing..." : "Remove"}
-                </button>
-              </div>
-            </div>
-          )
-        })}
+                      <p className="mt-2 text-sm text-zinc-400">
+                        {member.role === "manager"
+                          ? "Manager • Full Access"
+                          : "Staff • Team Visibility"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-zinc-500">
+                        {getRoleDescription(member.role)}
+                      </p>
+
+                      <p className="mt-3 text-xs text-zinc-500">
+                        Joined {formatDate(member.created_at)}
+                      </p>
+                    </div>
+
+                    {isManager ? (
+                      <div className="flex min-w-[220px] flex-col gap-3">
+                        <div>
+                          <label className="mb-1 block text-sm text-zinc-400">Role</label>
+                          <select
+                            value={member.role}
+                            onChange={(e) => handleRoleChange(member.id, e.target.value)}
+                            disabled={!isManager || isSaving || isRemoving}
+                            className="w-full rounded bg-black p-2 text-white"
+                          >
+                            {roleOptions.map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveMember(member.id)}
+                          disabled={!isManager || isSelf || isSaving || isRemoving}
+                          className="rounded bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-50"
+                        >
+                          {isSelf
+                            ? "You"
+                            : isRemoving
+                            ? "Removing..."
+                            : "Remove Member"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {isManager && (isSaving || isRemoving) ? (
+                    <p className="mt-3 text-xs text-zinc-500">
+                      {isSaving ? "Saving changes..." : "Removing member..."}
+                    </p>
+                  ) : null}
+                </div>
+              )
+            })
+          )}
+        </div>
       </div>
-
-      {members.length === 0 ? (
-        <p className="mt-6 text-zinc-400">No team members found.</p>
-      ) : null}
     </div>
   )
 }

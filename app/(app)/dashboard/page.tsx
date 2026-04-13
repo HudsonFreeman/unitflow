@@ -100,7 +100,6 @@ export default function DashboardPage() {
 
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState("")
-  const [organizationId, setOrganizationId] = useState("")
   const [role, setRole] = useState("")
   const [properties, setProperties] = useState<PropertyRow[]>([])
   const [units, setUnits] = useState<UnitRow[]>([])
@@ -126,6 +125,18 @@ export default function DashboardPage() {
         return
       }
 
+      // 🔥 NEW: force profile creation first
+      const { data: profile, error: profileError } = await supabaseClient
+        .from("profiles")
+        .select("user_id")
+        .eq("user_id", context.userId)
+        .single()
+
+      if (profileError || !profile) {
+        router.replace("/create-profile")
+        return
+      }
+
       if (!context.membership) {
         router.replace("/onboarding")
         return
@@ -133,7 +144,6 @@ export default function DashboardPage() {
 
       const orgId = context.activeOrganizationId
 
-      setOrganizationId(orgId)
       setRole(context.membership.role)
 
       const [
@@ -309,8 +319,14 @@ export default function DashboardPage() {
 
         <div className="flex flex-wrap gap-3">
           <Link
-            href="/properties"
+            href="/transfers"
             className="rounded-xl bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+          >
+            + Create Transfer
+          </Link>
+          <Link
+            href="/properties"
+            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-200 hover:bg-white/5"
           >
             Add Property
           </Link>
@@ -320,22 +336,11 @@ export default function DashboardPage() {
           >
             Add Tenant
           </Link>
-          <Link
-            href="/transfers"
-            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-200 hover:bg-white/5"
-          >
-            New Transfer
-          </Link>
         </div>
       </div>
 
       <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div>
-            <p className="text-sm text-zinc-400">Organization ID</p>
-            <p className="mt-1 break-all text-sm text-zinc-200">{organizationId}</p>
-          </div>
-
           <div>
             <p className="text-sm text-zinc-400">Signed-in Role</p>
             <p className="mt-1 text-sm capitalize text-zinc-200">{role}</p>
@@ -347,21 +352,32 @@ export default function DashboardPage() {
               {hasSetupGaps ? "Still setting up" : "Operational"}
             </p>
           </div>
+
+          <div>
+            <p className="text-sm text-zinc-400">System</p>
+            <p className="mt-1 text-sm text-zinc-200">Portfolio Transfer Management</p>
+          </div>
         </div>
       </div>
 
       <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-        <h2 className="text-lg font-semibold">Portfolio Risks & Opportunities</h2>
+        <h2 className="text-lg font-semibold">Action Center</h2>
 
         <div className="mt-4 space-y-3">
           {vacantUnits > 0 ? (
             <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4">
               <p className="font-medium text-red-300">
-                {vacantUnits} vacant unit{vacantUnits === 1 ? "" : "s"} with no tenant
+                {vacantUnits} vacant unit{vacantUnits === 1 ? "" : "s"} generating no revenue
               </p>
               <p className="mt-1 text-sm text-red-200">
-                These units are currently generating no revenue.
+                Review properties and start transfers to reduce empty-unit gaps.
               </p>
+              <Link
+                href="/properties"
+                className="mt-2 inline-block text-xs text-red-200 hover:text-white"
+              >
+                View units →
+              </Link>
             </div>
           ) : null}
 
@@ -371,27 +387,39 @@ export default function DashboardPage() {
                 {noticeTenants} tenant{noticeTenants === 1 ? "" : "s"} on notice
               </p>
               <p className="mt-1 text-sm text-amber-200">
-                These units may become vacant soon. Plan transfers early.
+                Plan transfers early before notice turns into vacancy loss.
               </p>
+              <Link
+                href="/tenants"
+                className="mt-2 inline-block text-xs text-amber-200 hover:text-white"
+              >
+                Review tenants →
+              </Link>
             </div>
           ) : null}
 
           {vacantUnits > 0 && tenants.length > 0 ? (
             <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
               <p className="font-medium text-emerald-300">
-                Immediate occupancy opportunity detected
+                You have vacant units and active tenants — transfers can reduce vacancy.
               </p>
               <p className="mt-1 text-sm text-emerald-200">
-                You have vacant units and active tenant data. Use transfers to reduce vacancy loss.
+                Move quickly to keep occupancy aligned across the portfolio.
               </p>
+              <Link
+                href="/transfers"
+                className="mt-2 inline-block text-xs text-emerald-200 hover:text-white"
+              >
+                Start transfer →
+              </Link>
             </div>
           ) : null}
 
           {vacantUnits === 0 && noticeTenants === 0 ? (
             <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4">
-              <p className="font-medium text-blue-300">Portfolio running efficiently</p>
+              <p className="font-medium text-blue-300">No immediate issues detected</p>
               <p className="mt-1 text-sm text-blue-200">
-                No immediate vacancy or notice risk detected.
+                No vacancy risk or notice pressure is showing right now.
               </p>
             </div>
           ) : null}
