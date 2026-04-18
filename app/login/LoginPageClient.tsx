@@ -1,28 +1,14 @@
 "use client"
 
 import { useState } from "react"
-import { useSearchParams } from "next/navigation"
 import { supabaseClient } from "@/lib/supabase-client"
 
 export default function LoginPageClient() {
-  const searchParams = useSearchParams()
-
-  const inviteToken = searchParams.get("inviteToken") ?? ""
-  const redirectTo = searchParams.get("redirect") ?? ""
-
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [mode, setMode] = useState<"login" | "signup">("login")
   const [message, setMessage] = useState("")
   const [loading, setLoading] = useState(false)
-
-  function getPostAuthDestination() {
-    if (redirectTo) return redirectTo
-    if (inviteToken) {
-      return `/onboarding?inviteToken=${encodeURIComponent(inviteToken)}`
-    }
-    return "/dashboard"
-  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -38,31 +24,37 @@ export default function LoginPageClient() {
 
         if (error) {
           setMessage(error.message)
-        } else {
-          window.location.href = getPostAuthDestination()
+          setLoading(false)
+          return
         }
-      } else {
-        const { error } = await supabaseClient.auth.signInWithPassword({
-          email,
-          password,
-        })
 
-        if (error) {
-          setMessage(error.message)
-        } else {
-          window.location.href = getPostAuthDestination()
-        }
+        await supabaseClient.auth.getSession()
+        window.location.assign("/dashboard")
+        return
       }
+
+      const { error } = await supabaseClient.auth.signInWithPassword({
+        email,
+        password,
+      })
+
+      if (error) {
+        setMessage(error.message)
+        setLoading(false)
+        return
+      }
+
+      await supabaseClient.auth.getSession()
+      window.location.assign("/dashboard")
     } catch {
       setMessage("Something went wrong.")
-    } finally {
       setLoading(false)
     }
   }
 
   async function handleSignOut() {
     await supabaseClient.auth.signOut()
-    window.location.href = "/login"
+    window.location.assign("/login")
   }
 
   return (
@@ -71,18 +63,8 @@ export default function LoginPageClient() {
         <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
           <h1 className="text-3xl font-semibold">UnitFlow Login</h1>
           <p className="mt-2 text-zinc-400">
-            Sign in with your Supabase account.
+            Sign in to manage properties, units, tenants, and transfers.
           </p>
-
-          {redirectTo ? (
-            <div className="mt-4 rounded-xl border border-blue-500/20 bg-blue-500/10 p-3 text-sm text-blue-300">
-              Invite detected. After login, you will be returned to the invite.
-            </div>
-          ) : inviteToken ? (
-            <div className="mt-4 rounded-xl border border-blue-500/20 bg-blue-500/10 p-3 text-sm text-blue-300">
-              Invite detected. After login, you will continue joining the organization.
-            </div>
-          ) : null}
 
           <div className="mt-4 flex gap-2">
             <button

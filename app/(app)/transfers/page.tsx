@@ -1,8 +1,12 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { getActiveOrganizationContext } from "@/lib/active-organization"
 import { supabaseClient } from "@/lib/supabase-client"
+import {
+  ALL_PROPERTIES_VALUE,
+  getStoredSelectedPropertyId,
+  setStoredSelectedPropertyId,
+} from "@/lib/selected-property"
 
 type TransferRow = {
   id: string
@@ -17,7 +21,6 @@ type TransferRow = {
   from_unit_id: string
   to_property_id: string
   to_unit_id: string
-  organization_id: string
 }
 
 type TenantRow = {
@@ -26,7 +29,6 @@ type TenantRow = {
   last_name: string
   property_id: string
   unit_id: string
-  organization_id: string
   status?: string | null
   lease_end?: string | null
 }
@@ -34,14 +36,12 @@ type TenantRow = {
 type PropertyRow = {
   id: string
   name: string
-  organization_id: string
 }
 
 type UnitRow = {
   id: string
   unit_number: string
   property_id: string
-  organization_id: string
   status?: string | null
 }
 
@@ -172,8 +172,7 @@ export default function TransfersPage() {
   const [suggestionLoadingTenantId, setSuggestionLoadingTenantId] = useState("")
   const [errorMessage, setErrorMessage] = useState("")
   const [successMessage, setSuccessMessage] = useState("")
-  const [organizationId, setOrganizationId] = useState("")
-  const [role, setRole] = useState("")
+  const [selectedPropertyId, setSelectedPropertyId] = useState(ALL_PROPERTIES_VALUE)
   const [selectedTenantId, setSelectedTenantId] = useState("")
   const [selectedToPropertyId, setSelectedToPropertyId] = useState("")
   const [selectedToUnitId, setSelectedToUnitId] = useState("")
@@ -193,34 +192,28 @@ export default function TransfersPage() {
     setSuccessMessage("")
   }
 
+  function handleSelectedPropertyChange(nextPropertyId: string) {
+    setSelectedPropertyId(nextPropertyId)
+    setStoredSelectedPropertyId(nextPropertyId)
+    setSelectedTenantId("")
+    setSelectedToUnitId("")
+    setSelectedToPropertyId(nextPropertyId === ALL_PROPERTIES_VALUE ? "" : nextPropertyId)
+  }
+
   async function loadTransfersPage() {
     setLoading(true)
     setErrorMessage("")
 
-    const context = await getActiveOrganizationContext()
+    const {
+      data: { user },
+      error: userError,
+    } = await supabaseClient.auth.getUser()
 
-    if (context.error) {
-      setErrorMessage(context.error)
-      setLoading(false)
-      return
-    }
-
-    if (!context.userId) {
+    if (userError || !user) {
       setErrorMessage("You must be logged in to view transfers.")
       setLoading(false)
       return
     }
-
-    if (!context.membership) {
-      setErrorMessage("No organization membership found for this user.")
-      setLoading(false)
-      return
-    }
-
-    const orgId = context.activeOrganizationId
-
-    setOrganizationId(orgId)
-    setRole(context.membership.role)
 
     const [
       { data: transfersData, error: transfersError },
@@ -230,23 +223,21 @@ export default function TransfersPage() {
     ] = await Promise.all([
       supabaseClient
         .from("transfers")
-        .select("*")
-        .eq("organization_id", orgId)
+        .select(
+          "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
+        )
         .order("created_at", { ascending: false }),
       supabaseClient
         .from("tenants")
-        .select("id, first_name, last_name, property_id, unit_id, organization_id, status, lease_end")
-        .eq("organization_id", orgId)
+        .select("id, first_name, last_name, property_id, unit_id, status, lease_end")
         .order("created_at", { ascending: false }),
       supabaseClient
         .from("properties")
-        .select("id, name, organization_id")
-        .eq("organization_id", orgId)
+        .select("id, name")
         .order("name"),
       supabaseClient
         .from("units")
-        .select("id, unit_number, property_id, organization_id, status")
-        .eq("organization_id", orgId)
+        .select("id, unit_number, property_id, status")
         .order("unit_number"),
     ])
 
@@ -262,15 +253,61 @@ export default function TransfersPage() {
       return
     }
 
-    setTransfers((transfersData ?? []) as TransferRow[])
-    setTenants((tenantsData ?? []) as TenantRow[])
-    setProperties((propertiesData ?? []) as PropertyRow[])
-    setUnits((unitsData ?? []) as UnitRow[])
+    const nextTransfers = (transfersData ?? []) as TransferRow[]
+    const nextTenants = (tenantsData ?? []) as TenantRow[]
+    const nextProperties = (propertiesData ?? []) as PropertyRow[]
+    const nextUnits = (unitsData ?? []) as UnitRow[]
+
+    setTransfers(nextTransfers)
+    setTenants(nextTenants)
+    setProperties(nextProperties)
+    setUnits(nextUnits)
+
+    const storedSelectedPropertyId = getStoredSelectedPropertyId()
+
+    if (
+      storedSelectedPropertyId === ALL_PROPERTIES_VALUE ||
+      nextProperties.some((property) => property.id === storedSelectedPropertyId)
+    ) {
+      setSelectedPropertyId(storedSelectedPropertyId)
+      setSelectedToPropertyId(
+        storedSelectedPropertyId === ALL_PROPERTIES_VALUE ? "" : storedSelectedPropertyId
+      )
+    } else if (nextProperties.length > 0) {
+      setSelectedPropertyId(nextProperties[0].id)
+      setSelectedToPropertyId(nextProperties[0].id)
+      setStoredSelectedPropertyId(nextProperties[0].id)
+    } else {
+      setSelectedPropertyId(ALL_PROPERTIES_VALUE)
+      setSelectedToPropertyId("")
+      setStoredSelectedPropertyId(ALL_PROPERTIES_VALUE)
+    }
+
     setLoading(false)
   }
 
   useEffect(() => {
     loadTransfersPage()
+  }, [])
+
+  useEffect(() => {
+    function handlePropertyChange(e: Event) {
+      const customEvent = e as CustomEvent<{ propertyId: string }>
+      const newPropertyId = customEvent.detail?.propertyId ?? ALL_PROPERTIES_VALUE
+
+      setSelectedPropertyId(newPropertyId)
+      setSelectedTenantId("")
+      setSelectedToUnitId("")
+      setSelectedToPropertyId(
+        newPropertyId === ALL_PROPERTIES_VALUE ? "" : newPropertyId
+      )
+    }
+
+    window.addEventListener("propertyChanged", handlePropertyChange)
+
+    return () => {
+      window.removeEventListener("propertyChanged", handlePropertyChange)
+    }
   }, [])
 
   const propertyMap = useMemo(
@@ -288,16 +325,36 @@ export default function TransfersPage() {
     [tenants]
   )
 
+  const selectedProperty =
+    selectedPropertyId === ALL_PROPERTIES_VALUE
+      ? null
+      : properties.find((property) => property.id === selectedPropertyId) ?? null
+
+  const scopedTenants = useMemo(() => {
+    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return tenants
+    return tenants.filter((tenant) => tenant.property_id === selectedPropertyId)
+  }, [tenants, selectedPropertyId])
+
+  const scopedTransfers = useMemo(() => {
+    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return transfers
+    return transfers.filter((transfer) => transfer.from_property_id === selectedPropertyId)
+  }, [transfers, selectedPropertyId])
+
+  const scopedUnits = useMemo(() => {
+    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return units
+    return units.filter((unit) => unit.property_id === selectedPropertyId)
+  }, [units, selectedPropertyId])
+
   const selectedTenant =
-    tenants.find((tenant) => tenant.id === selectedTenantId) ?? null
+    scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
 
   const fromUnitId = selectedTenant?.unit_id ?? ""
 
   const openTransfers = useMemo(() => {
-    return transfers.filter((transfer) =>
+    return scopedTransfers.filter((transfer) =>
       ["requested", "approved", "scheduled"].includes(transfer.status.toLowerCase())
     )
-  }, [transfers])
+  }, [scopedTransfers])
 
   const destinationUnits = useMemo(() => {
     if (!selectedToPropertyId) return []
@@ -356,7 +413,7 @@ export default function TransfersPage() {
 
     const suggestions: SmartSuggestion[] = []
 
-    for (const tenant of tenants) {
+    for (const tenant of scopedTenants) {
       const tenantStatus = (tenant.status ?? "").toLowerCase()
       const tenantHasOpenTransfer = openTransfers.some(
         (transfer) => transfer.tenant_id === tenant.id
@@ -441,29 +498,27 @@ export default function TransfersPage() {
     return suggestions
       .sort((a, b) => b.score - a.score)
       .slice(0, 6)
-  }, [tenants, units, openTransfers, propertyMap, unitMap])
+  }, [scopedTenants, units, openTransfers, propertyMap, unitMap])
 
   const filteredTransfers = useMemo(() => {
-    if (statusFilter === "all") return transfers
+    if (statusFilter === "all") return scopedTransfers
 
-    return transfers.filter(
+    return scopedTransfers.filter(
       (transfer) => transfer.status.toLowerCase() === statusFilter.toLowerCase()
     )
-  }, [transfers, statusFilter])
+  }, [scopedTransfers, statusFilter])
 
-  const requestedCount = transfers.filter(
+  const requestedCount = scopedTransfers.filter(
     (transfer) => transfer.status.toLowerCase() === "requested"
   ).length
 
-  const approvedCount = transfers.filter(
+  const approvedCount = scopedTransfers.filter(
     (transfer) => transfer.status.toLowerCase() === "approved"
   ).length
 
-  const completedCount = transfers.filter(
+  const completedCount = scopedTransfers.filter(
     (transfer) => transfer.status.toLowerCase() === "completed"
   ).length
-
-  const isManager = role.toLowerCase() === "manager"
 
   const pipelineCounts = useMemo(() => {
     const counts = {
@@ -473,13 +528,13 @@ export default function TransfersPage() {
       completed: 0,
     }
 
-    for (const transfer of transfers) {
+    for (const transfer of scopedTransfers) {
       const stage = getPipelineStage(transfer)
       counts[stage] += 1
     }
 
     return counts
-  }, [transfers])
+  }, [scopedTransfers])
 
   const conflictGroups = useMemo(() => {
     const byUnit = new Map<string, TransferRow[]>()
@@ -496,7 +551,10 @@ export default function TransfersPage() {
   }, [openTransfers])
 
   const bestAvailableUnits = useMemo(() => {
-    return units
+    const sourceUnits =
+      selectedPropertyId === ALL_PROPERTIES_VALUE ? units : scopedUnits
+
+    return sourceUnits
       .filter((unit) =>
         ["vacant", "make_ready", "notice"].includes((unit.status ?? "").toLowerCase())
       )
@@ -516,7 +574,7 @@ export default function TransfersPage() {
         })
       })
       .slice(0, 6)
-  }, [units, openTransfers, propertyMap])
+  }, [units, scopedUnits, openTransfers, propertyMap, selectedPropertyId])
 
   const tenantsWithOpenTransfers = useMemo(() => {
     return openTransfers
@@ -525,11 +583,14 @@ export default function TransfersPage() {
   }, [openTransfers, tenantMap])
 
   const noticeAndMakeReadyPool = useMemo(() => {
-    return units.filter((unit) => {
+    const sourceUnits =
+      selectedPropertyId === ALL_PROPERTIES_VALUE ? units : scopedUnits
+
+    return sourceUnits.filter((unit) => {
       const status = (unit.status ?? "").toLowerCase()
       return status === "notice" || status === "make_ready"
     })
-  }, [units])
+  }, [units, scopedUnits, selectedPropertyId])
 
   const timingRiskTransfers = useMemo(() => {
     const results: TimingRiskItem[] = []
@@ -577,20 +638,26 @@ export default function TransfersPage() {
   }, [openTransfers])
 
   const transfersRequiringReview = useMemo(() => {
-    return transfers.filter((transfer) => getPipelineStage(transfer) === "requested").length
-  }, [transfers])
+    return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "requested").length
+  }, [scopedTransfers])
 
   const approvedNeedingScheduling = useMemo(() => {
-    return transfers.filter((transfer) => getPipelineStage(transfer) === "approved").length
-  }, [transfers])
+    return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "approved").length
+  }, [scopedTransfers])
 
   const scheduledTransfers = useMemo(() => {
-    return transfers.filter((transfer) => getPipelineStage(transfer) === "scheduled").length
-  }, [transfers])
+    return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "scheduled").length
+  }, [scopedTransfers])
 
   async function handleUseSuggestion(suggestion: SmartSuggestion) {
     clearMessages()
     setSuggestionLoadingTenantId(suggestion.tenantId)
+
+    const tenant = tenantMap.get(suggestion.tenantId)
+    if (tenant) {
+      setSelectedPropertyId(tenant.property_id)
+      setStoredSelectedPropertyId(tenant.property_id)
+    }
 
     setSelectedTenantId(suggestion.tenantId)
     setSelectedToPropertyId(suggestion.suggestedPropertyId)
@@ -667,7 +734,7 @@ export default function TransfersPage() {
       }
 
       setSelectedTenantId("")
-      setSelectedToPropertyId("")
+      setSelectedToPropertyId(selectedPropertyId === ALL_PROPERTIES_VALUE ? "" : selectedPropertyId)
       setSelectedToUnitId("")
       setRequestedDate("")
       setMoveOutDate("")
@@ -685,12 +752,6 @@ export default function TransfersPage() {
 
   async function handleApproveTransfer(transferId: string) {
     clearMessages()
-
-    if (!isManager) {
-      setErrorMessage("Only managers can approve transfers.")
-      return
-    }
-
     setActionLoadingId(transferId)
 
     try {
@@ -723,12 +784,6 @@ export default function TransfersPage() {
 
   async function handleCompleteTransfer(transferId: string) {
     clearMessages()
-
-    if (!isManager) {
-      setErrorMessage("Only managers can complete transfers.")
-      return
-    }
-
     setActionLoadingId(transferId)
 
     try {
@@ -779,19 +834,30 @@ export default function TransfersPage() {
 
   return (
     <div>
-      <h1 className="text-3xl font-semibold">Transfers</h1>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-semibold">Transfers</h1>
+          <p className="mt-2 text-zinc-400">
+            {selectedProperty
+              ? `Coordinate internal resident moves for ${selectedProperty.name}.`
+              : "Coordinate internal resident moves, reduce vacancy risk, and keep every handoff visible."}
+          </p>
+        </div>
 
-      <p className="mt-2 text-zinc-400">
-        Coordinate internal resident moves, reduce vacancy risk, and keep every handoff visible.
-      </p>
-
-      <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
-        <p className="text-sm text-zinc-400">Signed-in role</p>
-        <p className="mt-1 text-sm capitalize text-zinc-200">{role}</p>
-        <p className="mt-3 text-sm text-zinc-400">Transfer environment</p>
-        <p className="mt-1 text-sm text-zinc-200">
-          Suggestions, destination units, and transfer activity are scoped to your active organization.
-        </p>
+        <div className="flex flex-wrap gap-3">
+          <select
+            value={selectedPropertyId}
+            onChange={(e) => handleSelectedPropertyChange(e.target.value)}
+            className="rounded-xl border border-white/10 bg-black px-4 py-2 text-sm text-white"
+          >
+            <option value={ALL_PROPERTIES_VALUE}>All Properties</option>
+            {properties.map((property) => (
+              <option key={property.id} value={property.id}>
+                {property.name}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {successMessage ? (
@@ -805,6 +871,16 @@ export default function TransfersPage() {
           {errorMessage}
         </div>
       ) : null}
+
+      <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
+        <p className="text-sm text-zinc-400">Current transfer scope</p>
+        <p className="mt-1 text-lg text-white">
+          {selectedProperty ? selectedProperty.name : "All Properties"}
+        </p>
+        <p className="mt-2 text-sm text-zinc-500">
+          Transfer list and pipeline are scoped by the tenant’s current property.
+        </p>
+      </div>
 
       <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5">
         <div className="flex items-start justify-between gap-3">
@@ -941,7 +1017,7 @@ export default function TransfersPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <p className="text-sm font-medium text-amber-200">Requested Queue</p>
             <div className="mt-3 space-y-2">
-              {transfers.filter((t) => getPipelineStage(t) === "requested").slice(0, 4).map((transfer) => {
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "requested").slice(0, 4).map((transfer) => {
                 const tenant = tenantMap.get(transfer.tenant_id)
                 return (
                   <div
@@ -952,7 +1028,7 @@ export default function TransfersPage() {
                   </div>
                 )
               })}
-              {transfers.filter((t) => getPipelineStage(t) === "requested").length === 0 ? (
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "requested").length === 0 ? (
                 <p className="text-sm text-zinc-500">Nothing waiting.</p>
               ) : null}
             </div>
@@ -961,7 +1037,7 @@ export default function TransfersPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <p className="text-sm font-medium text-emerald-200">Approved Queue</p>
             <div className="mt-3 space-y-2">
-              {transfers.filter((t) => getPipelineStage(t) === "approved").slice(0, 4).map((transfer) => {
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "approved").slice(0, 4).map((transfer) => {
                 const tenant = tenantMap.get(transfer.tenant_id)
                 return (
                   <div
@@ -972,7 +1048,7 @@ export default function TransfersPage() {
                   </div>
                 )
               })}
-              {transfers.filter((t) => getPipelineStage(t) === "approved").length === 0 ? (
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "approved").length === 0 ? (
                 <p className="text-sm text-zinc-500">Nothing approved.</p>
               ) : null}
             </div>
@@ -981,7 +1057,7 @@ export default function TransfersPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <p className="text-sm font-medium text-blue-200">Scheduled Queue</p>
             <div className="mt-3 space-y-2">
-              {transfers.filter((t) => getPipelineStage(t) === "scheduled").slice(0, 4).map((transfer) => {
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "scheduled").slice(0, 4).map((transfer) => {
                 const tenant = tenantMap.get(transfer.tenant_id)
                 return (
                   <div
@@ -992,7 +1068,7 @@ export default function TransfersPage() {
                   </div>
                 )
               })}
-              {transfers.filter((t) => getPipelineStage(t) === "scheduled").length === 0 ? (
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "scheduled").length === 0 ? (
                 <p className="text-sm text-zinc-500">Nothing scheduled.</p>
               ) : null}
             </div>
@@ -1001,7 +1077,7 @@ export default function TransfersPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <p className="text-sm font-medium text-zinc-200">Recently Completed</p>
             <div className="mt-3 space-y-2">
-              {transfers.filter((t) => getPipelineStage(t) === "completed").slice(0, 4).map((transfer) => {
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "completed").slice(0, 4).map((transfer) => {
                 const tenant = tenantMap.get(transfer.tenant_id)
                 return (
                   <div
@@ -1012,7 +1088,7 @@ export default function TransfersPage() {
                   </div>
                 )
               })}
-              {transfers.filter((t) => getPipelineStage(t) === "completed").length === 0 ? (
+              {scopedTransfers.filter((t) => getPipelineStage(t) === "completed").length === 0 ? (
                 <p className="text-sm text-zinc-500">Nothing completed yet.</p>
               ) : null}
             </div>
@@ -1192,7 +1268,7 @@ export default function TransfersPage() {
                 : "border-zinc-700 bg-black/30 text-zinc-400"
             }`}
           >
-            All ({transfers.length})
+            All ({scopedTransfers.length})
           </button>
 
           <button
@@ -1316,7 +1392,7 @@ export default function TransfersPage() {
                     {transfer.status}
                   </div>
 
-                  {isManager && transfer.status.toLowerCase() === "requested" ? (
+                  {transfer.status.toLowerCase() === "requested" ? (
                     <button
                       type="button"
                       onClick={() => handleApproveTransfer(transfer.id)}
@@ -1327,7 +1403,7 @@ export default function TransfersPage() {
                     </button>
                   ) : null}
 
-                  {isManager && transfer.status.toLowerCase() === "approved" ? (
+                  {transfer.status.toLowerCase() === "approved" ? (
                     <button
                       type="button"
                       onClick={() => handleCompleteTransfer(transfer.id)}
@@ -1361,6 +1437,22 @@ export default function TransfersPage() {
 
         <form onSubmit={handleCreateTransfer} className="grid grid-cols-1 gap-4">
           <div>
+            <label className="mb-1 block text-sm text-zinc-400">Property Context</label>
+            <select
+              className="w-full rounded bg-black p-2"
+              value={selectedPropertyId}
+              onChange={(e) => handleSelectedPropertyChange(e.target.value)}
+            >
+              <option value={ALL_PROPERTIES_VALUE}>All Properties</option>
+              {properties.map((property) => (
+                <option key={property.id} value={property.id}>
+                  {property.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
             <label className="mb-1 block text-sm text-zinc-400">Tenant</label>
             <select
               className="w-full rounded bg-black p-2"
@@ -1368,12 +1460,12 @@ export default function TransfersPage() {
               value={selectedTenantId}
               onChange={(e) => {
                 setSelectedTenantId(e.target.value)
-                setSelectedToPropertyId("")
+                setSelectedToPropertyId(selectedPropertyId === ALL_PROPERTIES_VALUE ? "" : selectedPropertyId)
                 setSelectedToUnitId("")
               }}
             >
               <option value="">Select Tenant</option>
-              {tenants.map((tenant) => (
+              {scopedTenants.map((tenant) => (
                 <option key={tenant.id} value={tenant.id}>
                   {tenant.first_name} {tenant.last_name}
                 </option>

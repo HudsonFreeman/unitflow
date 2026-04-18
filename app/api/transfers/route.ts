@@ -1,28 +1,16 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase-server"
 
-type OrganizationMemberRow = {
-  user_id: string
-  organization_id: string
-  role: string
-}
-
 type TenantRow = {
   id: string
-  organization_id: string
   property_id: string
   unit_id: string
 }
 
 type UnitRow = {
   id: string
-  organization_id: string
   property_id: string
   status: string | null
-}
-
-type ActiveOrgRow = {
-  organization_id: string
 }
 
 export async function POST(request: Request) {
@@ -65,68 +53,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 })
     }
 
-    const { data: activeOrgRow, error: activeOrgError } = await supabase
-      .from("user_active_org")
-      .select("organization_id")
-      .eq("user_id", user.id)
-      .single()
-
-    if (activeOrgError || !activeOrgRow) {
-      return NextResponse.json(
-        { error: "No active organization found." },
-        { status: 403 }
-      )
-    }
-
-    const activeOrg = activeOrgRow as ActiveOrgRow
-    const organization_id = activeOrg.organization_id
-
-    const { data: membershipRows, error: membershipError } = await supabase
-      .from("organization_members")
-      .select("user_id, organization_id, role")
-      .eq("user_id", user.id)
-      .eq("organization_id", organization_id)
-
-    if (membershipError) {
-      return NextResponse.json(
-        { error: membershipError.message },
-        { status: 500 }
-      )
-    }
-
-    if (!membershipRows || membershipRows.length === 0) {
-      return NextResponse.json(
-        { error: "No organization membership found." },
-        { status: 403 }
-      )
-    }
-
-    const membership = membershipRows[0] as OrganizationMemberRow
-
     const { data: tenantRows, error: tenantError } = await supabase
       .from("tenants")
-      .select("id, organization_id, property_id, unit_id")
+      .select("id, property_id, unit_id")
       .eq("id", tenant_id)
-      .eq("organization_id", organization_id)
 
     if (tenantError) {
       return NextResponse.json({ error: tenantError.message }, { status: 500 })
     }
 
     if (!tenantRows || tenantRows.length === 0) {
-      return NextResponse.json(
-        { error: "Tenant not found in your organization." },
-        { status: 404 }
-      )
+      return NextResponse.json({ error: "Tenant not found." }, { status: 404 })
     }
 
     const tenant = tenantRows[0] as TenantRow
 
     const { data: unitRows, error: unitError } = await supabase
       .from("units")
-      .select("id, organization_id, property_id, status")
+      .select("id, property_id, status")
       .eq("id", to_unit_id)
-      .eq("organization_id", organization_id)
       .eq("property_id", to_property_id)
 
     if (unitError) {
@@ -135,7 +80,7 @@ export async function POST(request: Request) {
 
     if (!unitRows || unitRows.length === 0) {
       return NextResponse.json(
-        { error: "Destination unit not found in your organization." },
+        { error: "Destination unit not found." },
         { status: 404 }
       )
     }
@@ -160,7 +105,6 @@ export async function POST(request: Request) {
     const { data: openTransfers, error: openTransfersError } = await supabase
       .from("transfers")
       .select("id, tenant_id, to_unit_id, status")
-      .eq("organization_id", organization_id)
       .in("status", ["requested", "approved", "scheduled"])
 
     if (openTransfersError) {
@@ -192,57 +136,25 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: insertedTransfers, error: insertError } = await supabase
-      .from("transfers")
-      .insert([
-        {
-          organization_id: membership.organization_id,
-          tenant_id: tenant.id,
-          from_property_id: tenant.property_id,
-          from_unit_id: tenant.unit_id,
-          to_property_id,
-          to_unit_id,
-          status: "requested",
-          requested_date: requested_date || null,
-          approved_date: null,
-          move_out_date: move_out_date || null,
-          move_in_date: move_in_date || null,
-          notes: notes || null,
-        },
-      ])
-      .select("id")
-      .single()
-
-    if (insertError || !insertedTransfers) {
-      return NextResponse.json(
-        { error: insertError?.message ?? "Failed to create transfer." },
-        { status: 500 }
-      )
-    }
-
-    const { error: auditError } = await supabase.from("audit_logs").insert([
+    const { error: insertError } = await supabase.from("transfers").insert([
       {
-        organization_id,
-        actor_user_id: user.id,
-        action: "transfer_created",
-        target_type: "transfer",
-        target_id: insertedTransfers.id,
-        details: {
-          tenant_id: tenant.id,
-          from_property_id: tenant.property_id,
-          from_unit_id: tenant.unit_id,
-          to_property_id,
-          to_unit_id,
-          requested_date: requested_date || null,
-          move_out_date: move_out_date || null,
-          move_in_date: move_in_date || null,
-        },
+        tenant_id: tenant.id,
+        from_property_id: tenant.property_id,
+        from_unit_id: tenant.unit_id,
+        to_property_id,
+        to_unit_id,
+        status: "requested",
+        requested_date: requested_date || null,
+        approved_date: null,
+        move_out_date: move_out_date || null,
+        move_in_date: move_in_date || null,
+        notes: notes || null,
       },
     ])
 
-    if (auditError) {
+    if (insertError) {
       return NextResponse.json(
-        { error: auditError.message },
+        { error: insertError.message || "Failed to create transfer." },
         { status: 500 }
       )
     }

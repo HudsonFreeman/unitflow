@@ -4,12 +4,7 @@ import Link from "next/link"
 import { useEffect, useState } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { supabaseClient } from "@/lib/supabase-client"
-import {
-  getActiveOrganizationContext,
-  setActiveOrganization,
-  type OrganizationMemberRow,
-  type OrganizationRow,
-} from "@/lib/active-organization"
+import PropertySelector from "@/components/PropertySelector"
 
 export default function AppLayout({
   children,
@@ -20,14 +15,12 @@ export default function AppLayout({
   const pathname = usePathname()
 
   const [loading, setLoading] = useState(true)
-  const [switchingOrg, setSwitchingOrg] = useState(false)
   const [userEmail, setUserEmail] = useState("")
-  const [organizationId, setOrganizationId] = useState("")
-  const [organizations, setOrganizations] = useState<OrganizationRow[]>([])
-  const [memberships, setMemberships] = useState<OrganizationMemberRow[]>([])
 
   useEffect(() => {
     async function guardApp() {
+      setLoading(true)
+
       const {
         data: { user },
         error: userError,
@@ -61,21 +54,6 @@ export default function AppLayout({
         return
       }
 
-      const context = await getActiveOrganizationContext()
-
-      if (context.error) {
-        router.replace("/login")
-        return
-      }
-
-      if (!context.membership) {
-        router.replace("/onboarding")
-        return
-      }
-
-      setOrganizationId(context.activeOrganizationId)
-      setOrganizations(context.organizations)
-      setMemberships(context.memberships)
       setLoading(false)
     }
 
@@ -87,35 +65,15 @@ export default function AppLayout({
     router.replace("/login")
   }
 
-  async function handleOrgChange(nextOrganizationId: string) {
-    if (!nextOrganizationId || nextOrganizationId === organizationId) return
-
-    setSwitchingOrg(true)
-
-    const result = await setActiveOrganization(nextOrganizationId)
-
-    if (result.error) {
-      setSwitchingOrg(false)
-      return
-    }
-
-    setOrganizationId(nextOrganizationId)
-    setSwitchingOrg(false)
-    router.refresh()
-    window.location.href = pathname
-  }
-
   function getLinkClasses(href: string) {
     const isActive = pathname === href
+
     return `group block rounded-xl px-3 py-3 text-sm font-medium transition ${
       isActive
         ? "bg-white/10 text-white shadow-lg"
         : "text-zinc-300 hover:bg-white/5 hover:text-white"
     }`
   }
-
-  const activeOrganization =
-    organizations.find((organization) => organization.id === organizationId) ?? null
 
   if (loading) {
     return (
@@ -155,34 +113,20 @@ export default function AppLayout({
                 <div className="mt-4 h-px bg-white/10" />
 
                 <p className="mt-4 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-                  Active organization
+                  System
                 </p>
                 <p className="mt-2 text-sm text-zinc-200">
-                  {activeOrganization?.name ?? "Unknown organization"}
+                  Property Operations Platform
                 </p>
+              </div>
 
-                <p className="mt-4 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-                  Switch organization
+              <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-4">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+                  Active Property Scope
                 </p>
-                <select
-                  value={organizationId}
-                  onChange={(e) => handleOrgChange(e.target.value)}
-                  disabled={switchingOrg}
-                  className="mt-2 w-full rounded-xl bg-black p-2 text-sm text-white"
-                >
-                  {organizations.map((organization) => (
-                    <option key={organization.id} value={organization.id}>
-                      {organization.name}
-                    </option>
-                  ))}
-                </select>
-
-                <p className="mt-4 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-                  Organization ID
-                </p>
-                <p className="mt-2 break-all text-xs text-zinc-400">
-                  {organizationId}
-                </p>
+                <div className="mt-3">
+                  <PropertySelector />
+                </div>
               </div>
 
               <nav className="mt-6 space-y-2">
