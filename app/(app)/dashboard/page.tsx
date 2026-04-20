@@ -51,6 +51,16 @@ type TransferRow = {
   created_by: string
 }
 
+type RecommendedAction = {
+  id: string
+  title: string
+  description: string
+  reason: string
+  href: string
+  cta: string
+  tone: "red" | "amber" | "blue" | "emerald"
+}
+
 function getTransferStatusClasses(status: string) {
   switch (status.toLowerCase()) {
     case "requested":
@@ -83,16 +93,34 @@ function getUnitStatusClasses(status?: string | null) {
   }
 }
 
+function getActionToneClasses(tone: RecommendedAction["tone"]) {
+  switch (tone) {
+    case "red":
+      return "border-red-500/20 bg-red-500/10 text-red-300"
+    case "amber":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-300"
+    case "blue":
+      return "border-blue-500/20 bg-blue-500/10 text-blue-300"
+    case "emerald":
+      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300"
+  }
+}
+
 function formatTransferWindow(moveOutDate?: string | null, moveInDate?: string | null) {
   if (moveOutDate && moveInDate) {
     return `${moveOutDate} → ${moveInDate}`
   }
+
   if (moveOutDate) {
     return `Move out: ${moveOutDate}`
   }
+
   if (moveInDate) {
     return `Move in: ${moveInDate}`
   }
+
   return "Dates not scheduled"
 }
 
@@ -121,6 +149,7 @@ function getMetricToneClasses(value: number, reverse = false) {
     if (value <= 40) return "text-amber-300"
     return "text-red-300"
   }
+
   if (value >= 80) return "text-emerald-300"
   if (value >= 60) return "text-blue-300"
   if (value >= 40) return "text-amber-300"
@@ -140,7 +169,9 @@ async function fetchAllProperties(): Promise<PropertyRow[]> {
       .order("id")
       .range(from, from + pageSize - 1)
 
-    if (error) throw new Error(error.message)
+    if (error) {
+      throw new Error(error.message)
+    }
 
     const rows = (data ?? []) as PropertyRow[]
     allRows.push(...rows)
@@ -168,7 +199,9 @@ async function fetchAllUnits(): Promise<UnitRow[]> {
       .order("id")
       .range(from, from + pageSize - 1)
 
-    if (error) throw new Error(error.message)
+    if (error) {
+      throw new Error(error.message)
+    }
 
     const rows = (data ?? []) as UnitRow[]
     allRows.push(...rows)
@@ -196,7 +229,9 @@ async function fetchAllTenants(): Promise<TenantRow[]> {
       .order("id")
       .range(from, from + pageSize - 1)
 
-    if (error) throw new Error(error.message)
+    if (error) {
+      throw new Error(error.message)
+    }
 
     const rows = (data ?? []) as TenantRow[]
     allRows.push(...rows)
@@ -226,7 +261,9 @@ async function fetchAllTransfers(): Promise<TransferRow[]> {
       .order("id")
       .range(from, from + pageSize - 1)
 
-    if (error) throw new Error(error.message)
+    if (error) {
+      throw new Error(error.message)
+    }
 
     const rows = (data ?? []) as TransferRow[]
     allRows.push(...rows)
@@ -330,7 +367,10 @@ export default function DashboardPage() {
     }
 
     window.addEventListener("propertyChanged", handlePropertyChange)
-    return () => window.removeEventListener("propertyChanged", handlePropertyChange)
+
+    return () => {
+      window.removeEventListener("propertyChanged", handlePropertyChange)
+    }
   }, [])
 
   function handleSelectedPropertyChange(nextPropertyId: string) {
@@ -365,6 +405,7 @@ export default function DashboardPage() {
 
   const scopedTransfers = useMemo(() => {
     if (selectedPropertyId === ALL_PROPERTIES_VALUE) return transfers
+
     return transfers.filter(
       (transfer) =>
         transfer.from_property_id === selectedPropertyId ||
@@ -413,11 +454,7 @@ export default function DashboardPage() {
     (tenant) => tenant.status.toLowerCase() === "moved_out"
   ).length
 
-  const recentTransfers = useMemo(() => {
-    return [...scopedTransfers]
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
-      .slice(0, 5)
-  }, [scopedTransfers])
+  const recentTransfers = scopedTransfers.slice(0, 5)
 
   const propertySummaries = useMemo(() => {
     const propertiesToShow =
@@ -475,29 +512,36 @@ export default function DashboardPage() {
 
   const operationalHealthScore = useMemo(() => {
     if (totalUnits === 0) return 0
+
     const vacancyPenalty = vacantUnits * 9
     const noticePenalty = noticeUnits * 6
     const transferPenalty = Math.max(0, openTransfers - completedTransfers) * 2
+
     return clampScore(occupancyRate - vacancyPenalty - noticePenalty - transferPenalty)
   }, [totalUnits, vacantUnits, noticeUnits, openTransfers, completedTransfers, occupancyRate])
 
   const vacancyRiskScore = useMemo(() => {
     if (totalUnits === 0) return 0
+
     const exposureUnits = vacantUnits + noticeUnits + makeReadyUnits * 0.5
     return clampScore((exposureUnits / totalUnits) * 100)
   }, [totalUnits, vacantUnits, noticeUnits, makeReadyUnits])
 
   const transferReadinessScore = useMemo(() => {
     if (totalUnits === 0) return 0
+
     const readyUnits = vacantUnits + makeReadyUnits + noticeUnits
     const readinessBase = (readyUnits / totalUnits) * 100
     const openTransferBonus = Math.min(openTransfers * 6, 20)
+
     return clampScore(readinessBase + openTransferBonus)
   }, [totalUnits, vacantUnits, makeReadyUnits, noticeUnits, openTransfers])
 
   const transferCompletionRate = useMemo(() => {
-    const totalTransferActivity = requestedTransfers + approvedTransfers + scheduledTransfers + completedTransfers
+    const totalTransferActivity =
+      requestedTransfers + approvedTransfers + scheduledTransfers + completedTransfers
     if (totalTransferActivity === 0) return 0
+
     return Math.round((completedTransfers / totalTransferActivity) * 100)
   }, [requestedTransfers, approvedTransfers, scheduledTransfers, completedTransfers])
 
@@ -594,6 +638,96 @@ export default function DashboardPage() {
     },
   ]
 
+  const recommendedActions = useMemo<RecommendedAction[]>(() => {
+    const actions: RecommendedAction[] = []
+
+    const noticeTenantsForActions = scopedTenants
+      .filter((tenant) => tenant.status.toLowerCase() === "notice")
+      .slice(0, 2)
+
+    for (const tenant of noticeTenantsForActions) {
+      const property = propertyMap.get(tenant.property_id)
+      actions.push({
+        id: `notice-${tenant.id}`,
+        title: `${tenant.first_name} ${tenant.last_name} is on notice`,
+        description: "Review this tenant now and decide whether to retain, transfer, or prepare for vacancy.",
+        reason: `${property?.name ?? "This property"} already has notice pressure.`,
+        href: "/tenants",
+        cta: "Review tenant",
+        tone: "amber",
+      })
+    }
+
+    if (vacantUnits > 0) {
+      actions.push({
+        id: "vacant-units",
+        title: `${vacantUnits} vacant unit${vacantUnits === 1 ? "" : "s"} need attention`,
+        description: "Vacant units generate no revenue. Review open units and decide where transfer opportunities exist.",
+        reason: "Empty inventory is the clearest current revenue leak.",
+        href: "/properties",
+        cta: "Review units",
+        tone: "red",
+      })
+    }
+
+    if (makeReadyUnits > 0) {
+      actions.push({
+        id: "make-ready-units",
+        title: `${makeReadyUnits} unit${makeReadyUnits === 1 ? "" : "s"} are in make-ready`,
+        description: "These units are close to being usable and should be watched closely for next placement.",
+        reason: "Make-ready units are near-term inventory you can activate.",
+        href: "/properties",
+        cta: "Open properties",
+        tone: "blue",
+      })
+    }
+
+    if (openTransfers > 0) {
+      actions.push({
+        id: "open-transfers",
+        title: `${openTransfers} transfer${openTransfers === 1 ? "" : "s"} are still open`,
+        description: "Pending transfer work should move forward quickly so requests do not stall in the system.",
+        reason: "Open transfers represent active operational decisions still in motion.",
+        href: "/transfers",
+        cta: "Open transfers",
+        tone: "blue",
+      })
+    }
+
+    if (vacantUnits > 0 && noticeTenants > 0) {
+      actions.push({
+        id: "retention-opportunity",
+        title: "You have a retention opportunity",
+        description: "There are both vacant units and notice tenants in the current scope. Review whether an internal move can prevent vacancy loss.",
+        reason: "This is where UnitFlow creates the most value.",
+        href: "/transfers",
+        cta: "Start transfer",
+        tone: "emerald",
+      })
+    }
+
+    if (actions.length === 0) {
+      actions.push({
+        id: "stable-state",
+        title: "No immediate actions detected",
+        description: "The current property scope looks stable right now. Use this time to review performance and keep the portfolio balanced.",
+        reason: "No current vacancy or notice pressure is showing.",
+        href: "/properties",
+        cta: "View portfolio",
+        tone: "emerald",
+      })
+    }
+
+    return actions.slice(0, 6)
+  }, [
+    scopedTenants,
+    propertyMap,
+    vacantUnits,
+    makeReadyUnits,
+    openTransfers,
+    noticeTenants,
+  ])
+
   if (loading) {
     return (
       <div>
@@ -667,16 +801,66 @@ export default function DashboardPage() {
               {selectedProperty ? selectedProperty.name : "All Properties"}
             </p>
           </div>
+
           <div>
             <p className="text-sm text-zinc-400">System</p>
             <p className="mt-1 text-sm text-zinc-200">Property Operations Platform</p>
           </div>
+
           <div>
             <p className="text-sm text-zinc-400">Focus</p>
             <p className="mt-1 text-sm text-zinc-200">
               Coordinated internal tenant transfers
             </p>
           </div>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Recommended Actions</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Clear next steps based on the current property scope.
+            </p>
+          </div>
+          <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-zinc-400">
+            {selectedProperty ? "Property View" : "Portfolio View"}
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {recommendedActions.map((action) => (
+            <div
+              key={action.id}
+              className="rounded-xl border border-white/10 bg-black/20 p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-[220px] flex-1">
+                  <div
+                    className={`inline-flex rounded-full border px-3 py-1 text-xs ${getActionToneClasses(
+                      action.tone
+                    )}`}
+                  >
+                    Recommended
+                  </div>
+
+                  <h3 className="mt-3 text-base font-semibold text-white">
+                    {action.title}
+                  </h3>
+                  <p className="mt-2 text-sm text-zinc-300">{action.description}</p>
+                  <p className="mt-2 text-xs text-zinc-500">{action.reason}</p>
+                </div>
+
+                <Link
+                  href={action.href}
+                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
+                >
+                  {action.cta}
+                </Link>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -708,12 +892,14 @@ export default function DashboardPage() {
                   </p>
                 </div>
               </div>
+
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
                 <div
                   className={`h-full rounded-full ${card.barClasses}`}
                   style={{ width: `${card.barValue}%` }}
                 />
               </div>
+
               <p className="mt-3 text-sm text-zinc-500">{card.subtext}</p>
             </div>
           ))}
@@ -730,71 +916,6 @@ export default function DashboardPage() {
               <p className="mt-2 text-sm text-zinc-500">{metric.subtext}</p>
             </div>
           ))}
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-        <h2 className="text-lg font-semibold">Action Center</h2>
-        <div className="mt-4 space-y-3">
-          {vacantUnits > 0 ? (
-            <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4">
-              <p className="font-medium text-red-300">
-                {vacantUnits} vacant unit{vacantUnits === 1 ? "" : "s"} generating no revenue
-              </p>
-              <p className="mt-1 text-sm text-red-200">
-                Review properties and start transfers to reduce empty-unit gaps.
-              </p>
-              <Link
-                href="/properties"
-                className="mt-2 inline-block text-xs text-red-200 hover:text-white"
-              >
-                View units →
-              </Link>
-            </div>
-          ) : null}
-
-          {noticeTenants > 0 ? (
-            <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
-              <p className="font-medium text-amber-300">
-                {noticeTenants} tenant{noticeTenants === 1 ? "" : "s"} on notice
-              </p>
-              <p className="mt-1 text-sm text-amber-200">
-                Plan transfers early before notice turns into vacancy loss.
-              </p>
-              <Link
-                href="/tenants"
-                className="mt-2 inline-block text-xs text-amber-200 hover:text-white"
-              >
-                Review tenants →
-              </Link>
-            </div>
-          ) : null}
-
-          {vacantUnits > 0 && scopedTenants.length > 0 ? (
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-              <p className="font-medium text-emerald-300">
-                You have vacant units and active tenants — transfers can reduce vacancy.
-              </p>
-              <p className="mt-1 text-sm text-emerald-200">
-                Move quickly to keep occupancy aligned across the portfolio.
-              </p>
-              <Link
-                href="/transfers"
-                className="mt-2 inline-block text-xs text-emerald-200 hover:text-white"
-              >
-                Start transfer →
-              </Link>
-            </div>
-          ) : null}
-
-          {vacantUnits === 0 && noticeTenants === 0 ? (
-            <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4">
-              <p className="font-medium text-blue-300">No immediate issues detected</p>
-              <p className="mt-1 text-sm text-blue-200">
-                No vacancy risk or notice pressure is showing right now.
-              </p>
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -844,23 +965,28 @@ export default function DashboardPage() {
               View
             </Link>
           </div>
+
           <div className="mt-4 space-y-3">
             <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
               <span className="text-zinc-300">Total Units</span>
               <span className="font-medium">{totalUnits}</span>
             </div>
+
             <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
               <span className="text-zinc-300">Occupied</span>
               <span className="font-medium">{occupiedUnits}</span>
             </div>
+
             <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
               <span className="text-zinc-300">Vacant</span>
               <span className="font-medium">{vacantUnits}</span>
             </div>
+
             <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
               <span className="text-zinc-300">Make Ready</span>
               <span className="font-medium">{makeReadyUnits}</span>
             </div>
+
             <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
               <span className="text-zinc-300">Notice Units</span>
               <span className="font-medium">{noticeUnits}</span>
@@ -875,6 +1001,7 @@ export default function DashboardPage() {
               View all
             </Link>
           </div>
+
           <div className="mt-4 space-y-3">
             {recentTransfers.length === 0 ? (
               <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
@@ -906,6 +1033,7 @@ export default function DashboardPage() {
                           {formatTransferWindow(transfer.move_out_date, transfer.move_in_date)}
                         </p>
                       </div>
+
                       <span
                         className={`rounded-full border px-3 py-1 text-xs capitalize ${getTransferStatusClasses(
                           transfer.status
@@ -914,6 +1042,7 @@ export default function DashboardPage() {
                         {transfer.status}
                       </span>
                     </div>
+
                     {transfer.notes ? (
                       <p className="mt-3 text-sm text-zinc-400">{transfer.notes}</p>
                     ) : null}
@@ -935,6 +1064,7 @@ export default function DashboardPage() {
               Manage
             </Link>
           </div>
+
           <div className="mt-4 space-y-3">
             {propertySummaries.length === 0 ? (
               <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
@@ -953,11 +1083,13 @@ export default function DashboardPage() {
                         {summary.totalUnits} units • {summary.tenants} tenants
                       </p>
                     </div>
+
                     <div className="text-right">
                       <p className="text-lg font-semibold">{summary.occupancy}%</p>
                       <p className="text-xs text-zinc-500">occupied</p>
                     </div>
                   </div>
+
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
                     <div
                       className={`h-full rounded-full ${getBarToneClasses(summary.occupancy)}`}
@@ -977,6 +1109,7 @@ export default function DashboardPage() {
               {setupChecklist.filter((item) => item.done).length}/{setupChecklist.length}
             </span>
           </div>
+
           <div className="mt-4 space-y-3">
             {setupChecklist.map((item) => (
               <div
@@ -989,6 +1122,7 @@ export default function DashboardPage() {
                     {item.done ? "Completed" : "Still needed"}
                   </p>
                 </div>
+
                 <div className="flex items-center gap-3">
                   <span
                     className={`rounded-full px-3 py-1 text-xs ${
@@ -999,6 +1133,7 @@ export default function DashboardPage() {
                   >
                     {item.done ? "Done" : "Pending"}
                   </span>
+
                   {!item.done ? (
                     <Link
                       href={item.href}
@@ -1021,6 +1156,7 @@ export default function DashboardPage() {
             Open properties
           </Link>
         </div>
+
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {scopedUnits.length === 0 ? (
             <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">

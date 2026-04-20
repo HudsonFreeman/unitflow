@@ -30,6 +30,7 @@ type TenantRow = {
   property_id: string
   unit_id: string
   status?: string | null
+  lease_start?: string | null
   lease_end?: string | null
 }
 
@@ -51,20 +52,10 @@ type TimingRiskItem = {
   gapDays: number | null
 }
 
-type SmartSuggestion = {
-  tenantId: string
-  tenantName: string
-  fromPropertyName: string
-  fromUnitNumber: string
-  suggestedPropertyId: string
-  suggestedPropertyName: string
-  suggestedUnitId: string
-  suggestedUnitNumber: string
-  suggestedUnitStatus: string | null
-  score: number
-  reason: string
-  leaseRiskLabel: string
-  impactLabel: string
+type DestinationUnitOption = UnitRow & {
+  expectedDate: Date | null
+  gap: number | null
+  label: string
 }
 
 function getTransferStatusClasses(status: string) {
@@ -84,37 +75,14 @@ function getTransferStatusClasses(status: string) {
   }
 }
 
-function getUnitStatusClasses(status?: string | null) {
-  switch ((status ?? "").toLowerCase()) {
-    case "vacant":
-      return "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
-    case "make_ready":
-      return "border-orange-500/20 bg-orange-500/10 text-orange-300"
-    case "notice":
-      return "border-amber-500/20 bg-amber-500/10 text-amber-300"
-    case "occupied":
-      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-    default:
-      return "border-white/10 bg-white/5 text-zinc-300"
-  }
-}
-
 function formatUnitStatus(status?: string | null) {
   if (!status) return "unknown"
   return status.replaceAll("_", " ")
 }
 
-function getUnitPriorityScore(status?: string | null) {
-  switch ((status ?? "").toLowerCase()) {
-    case "vacant":
-      return 3
-    case "make_ready":
-      return 2
-    case "notice":
-      return 1
-    default:
-      return 0
-  }
+function formatTenantStatus(status?: string | null) {
+  if (!status) return "Unknown"
+  return status.replaceAll("_", " ")
 }
 
 function getDateDiffInDays(start: string, end: string) {
@@ -165,11 +133,89 @@ function getLeaseRiskLabel(leaseEnd?: string | null) {
   return "Longer runway"
 }
 
+function formatDateForInput(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function formatShortDate(date: Date | null) {
+  if (!date) return "Unknown"
+  return date.toLocaleDateString()
+}
+
+function formatDateValue(value?: string | null) {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString()
+}
+
+function getExpectedAvailableDate(
+  unit: UnitRow,
+  tenants: TenantRow[],
+  transfers: TransferRow[]
+): Date | null {
+  const status = (unit.status ?? "").toLowerCase()
+  const today = new Date()
+
+  if (status === "vacant") return today
+
+  if (status === "make_ready") {
+    const d = new Date(today)
+    d.setDate(today.getDate() + 7)
+    return d
+  }
+
+  const relatedOpenTransfer = transfers.find(
+    (transfer) =>
+      transfer.from_unit_id === unit.id &&
+      ["requested", "approved", "scheduled"].includes(transfer.status.toLowerCase()) &&
+      transfer.move_out_date
+  )
+
+  if (relatedOpenTransfer?.move_out_date) {
+    const d = new Date(relatedOpenTransfer.move_out_date)
+    if (!Number.isNaN(d.getTime())) return d
+  }
+
+  if (status === "notice") {
+    const tenant = tenants.find(
+      (t) =>
+        t.unit_id === unit.id &&
+        !["moved_out", "transferred"].includes((t.status ?? "").toLowerCase())
+    )
+
+    if (tenant?.lease_end) {
+      const d = new Date(tenant.lease_end)
+      if (!Number.isNaN(d.getTime())) return d
+    }
+  }
+
+  return null
+}
+
+function getTimingLabel(gap: number | null) {
+  if (gap === null) return "Unknown timing"
+  if (gap >= 0 && gap <= 2) return "Best fit"
+  if (gap < 0) return "Available early"
+  if (gap <= 7) return "Slight delay"
+  return "Too late"
+}
+
+function getMoveVsLeaseLabel(moveInDate?: string, leaseEnd?: string | null) {
+  if (!moveInDate || !leaseEnd) return "Move timing vs lease unknown"
+
+  const diff = getDateDiffInDays(moveInDate, leaseEnd)
+  if (diff === null) return "Move timing vs lease unknown"
+
+  if (diff < 0) return `Move is ${Math.abs(diff)} day(s) after lease end`
+  if (diff === 0) return "Move is on lease end date"
+  return `Move is ${diff} day(s) before lease end`
+}
+
 export default function TransfersPage() {
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [actionLoadingId, setActionLoadingId] = useState("")
-  const [suggestionLoadingTenantId, setSuggestionLoadingTenantId] = useState("")
   const [errorMessage, setErrorMessage] = useState("")
   const [successMessage, setSuccessMessage] = useState("")
   const [selectedPropertyId, setSelectedPropertyId] = useState(ALL_PROPERTIES_VALUE)
@@ -198,6 +244,22 @@ export default function TransfersPage() {
     setSelectedTenantId("")
     setSelectedToUnitId("")
     setSelectedToPropertyId(nextPropertyId === ALL_PROPERTIES_VALUE ? "" : nextPropertyId)
+    setRequestedDate("")
+    setMoveOutDate("")
+    setMoveInDate("")
+  }
+
+  function setDefaultTransferDates() {
+    const today = new Date()
+    const moveOut = new Date(today)
+    const moveIn = new Date(today)
+
+    moveOut.setDate(today.getDate() + 7)
+    moveIn.setDate(today.getDate() + 8)
+
+    setRequestedDate(formatDateForInput(today))
+    setMoveOutDate(formatDateForInput(moveOut))
+    setMoveInDate(formatDateForInput(moveIn))
   }
 
   async function loadTransfersPage() {
@@ -229,7 +291,7 @@ export default function TransfersPage() {
         .order("created_at", { ascending: false }),
       supabaseClient
         .from("tenants")
-        .select("id, first_name, last_name, property_id, unit_id, status, lease_end")
+        .select("id, first_name, last_name, property_id, unit_id, status, lease_start, lease_end")
         .order("created_at", { ascending: false }),
       supabaseClient
         .from("properties")
@@ -298,9 +360,10 @@ export default function TransfersPage() {
       setSelectedPropertyId(newPropertyId)
       setSelectedTenantId("")
       setSelectedToUnitId("")
-      setSelectedToPropertyId(
-        newPropertyId === ALL_PROPERTIES_VALUE ? "" : newPropertyId
-      )
+      setSelectedToPropertyId(newPropertyId === ALL_PROPERTIES_VALUE ? "" : newPropertyId)
+      setRequestedDate("")
+      setMoveOutDate("")
+      setMoveInDate("")
     }
 
     window.addEventListener("propertyChanged", handlePropertyChange)
@@ -331,8 +394,14 @@ export default function TransfersPage() {
       : properties.find((property) => property.id === selectedPropertyId) ?? null
 
   const scopedTenants = useMemo(() => {
-    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return tenants
-    return tenants.filter((tenant) => tenant.property_id === selectedPropertyId)
+    const baseTenants =
+      selectedPropertyId === ALL_PROPERTIES_VALUE
+        ? tenants
+        : tenants.filter((tenant) => tenant.property_id === selectedPropertyId)
+
+    return baseTenants.filter(
+      (tenant) => !["moved_out", "transferred"].includes((tenant.status ?? "").toLowerCase())
+    )
   }, [tenants, selectedPropertyId])
 
   const scopedTransfers = useMemo(() => {
@@ -340,14 +409,7 @@ export default function TransfersPage() {
     return transfers.filter((transfer) => transfer.from_property_id === selectedPropertyId)
   }, [transfers, selectedPropertyId])
 
-  const scopedUnits = useMemo(() => {
-    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return units
-    return units.filter((unit) => unit.property_id === selectedPropertyId)
-  }, [units, selectedPropertyId])
-
-  const selectedTenant =
-    scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
-
+  const selectedTenant = scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
   const fromUnitId = selectedTenant?.unit_id ?? ""
 
   const openTransfers = useMemo(() => {
@@ -356,149 +418,68 @@ export default function TransfersPage() {
     )
   }, [scopedTransfers])
 
-  const destinationUnits = useMemo(() => {
+  const destinationUnits = useMemo<DestinationUnitOption[]>(() => {
     if (!selectedToPropertyId) return []
 
-    return units.filter((unit) => {
-      const status = (unit.status ?? "").toLowerCase()
+    return units
+      .filter((unit) => {
+        const status = (unit.status ?? "").toLowerCase()
 
-      return (
-        unit.property_id === selectedToPropertyId &&
-        unit.id !== fromUnitId &&
-        ["vacant", "make_ready", "notice"].includes(status)
-      )
-    })
-  }, [units, selectedToPropertyId, fromUnitId])
-
-  const recommendedDestinationUnit = useMemo(() => {
-    if (!selectedTenant) return null
-
-    const candidates = units
-      .filter((unit) => unit.id !== selectedTenant.unit_id)
-      .filter((unit) =>
-        ["vacant", "make_ready", "notice"].includes((unit.status ?? "").toLowerCase())
-      )
+        return (
+          unit.property_id === selectedToPropertyId &&
+          unit.id !== fromUnitId &&
+          ["vacant", "make_ready", "notice"].includes(status)
+        )
+      })
       .filter((unit) => !openTransfers.some((transfer) => transfer.to_unit_id === unit.id))
+      .map((unit) => {
+        const expectedDate = getExpectedAvailableDate(unit, tenants, transfers)
+
+        let gap: number | null = null
+
+        if (expectedDate && moveInDate) {
+          const requested = new Date(moveInDate)
+          if (!Number.isNaN(requested.getTime())) {
+            gap = Math.round(
+              (expectedDate.getTime() - requested.getTime()) / (1000 * 60 * 60 * 24)
+            )
+          }
+        }
+
+        return {
+          ...unit,
+          expectedDate,
+          gap,
+          label: getTimingLabel(gap),
+        }
+      })
       .sort((a, b) => {
-        const aSameProperty = a.property_id === selectedTenant.property_id ? 1 : 0
-        const bSameProperty = b.property_id === selectedTenant.property_id ? 1 : 0
-
-        if (bSameProperty !== aSameProperty) {
-          return bSameProperty - aSameProperty
+        if (a.gap === null && b.gap === null) {
+          return a.unit_number.localeCompare(b.unit_number, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          })
         }
+        if (a.gap === null) return 1
+        if (b.gap === null) return -1
 
-        const scoreDiff = getUnitPriorityScore(b.status) - getUnitPriorityScore(a.status)
-        if (scoreDiff !== 0) return scoreDiff
-
-        const propertyA = propertyMap.get(a.property_id)?.name ?? ""
-        const propertyB = propertyMap.get(b.property_id)?.name ?? ""
-
-        if (propertyA !== propertyB) {
-          return propertyA.localeCompare(propertyB)
-        }
+        const distanceDiff = Math.abs(a.gap) - Math.abs(b.gap)
+        if (distanceDiff !== 0) return distanceDiff
 
         return a.unit_number.localeCompare(b.unit_number, undefined, {
           numeric: true,
           sensitivity: "base",
         })
       })
+  }, [units, selectedToPropertyId, fromUnitId, openTransfers, tenants, transfers, moveInDate])
 
-    return candidates[0] ?? null
-  }, [selectedTenant, units, openTransfers, propertyMap])
+  const selectedDestinationUnit =
+    destinationUnits.find((unit) => unit.id === selectedToUnitId) ?? null
 
-  const smartSuggestions = useMemo(() => {
-    const availableUnits = units.filter((unit) =>
-      ["vacant", "make_ready", "notice"].includes((unit.status ?? "").toLowerCase())
-    )
-
-    const suggestions: SmartSuggestion[] = []
-
-    for (const tenant of scopedTenants) {
-      const tenantStatus = (tenant.status ?? "").toLowerCase()
-      const tenantHasOpenTransfer = openTransfers.some(
-        (transfer) => transfer.tenant_id === tenant.id
-      )
-
-      const leaseDays = getDaysUntil(tenant.lease_end)
-      const leaseSoon = leaseDays !== null && leaseDays <= 45
-      const onNotice = tenantStatus === "notice"
-
-      if (!leaseSoon && !onNotice) continue
-      if (tenantHasOpenTransfer) continue
-
-      const candidates = availableUnits
-        .filter((unit) => unit.id !== tenant.unit_id)
-        .filter((unit) => !openTransfers.some((transfer) => transfer.to_unit_id === unit.id))
-        .map((unit) => {
-          const samePropertyBonus = unit.property_id === tenant.property_id ? 5 : 0
-          const priorityScore = getUnitPriorityScore(unit.status)
-          const leaseUrgencyBonus = onNotice ? 4 : leaseSoon ? 2 : 0
-          const score = priorityScore * 10 + samePropertyBonus + leaseUrgencyBonus
-
-          let reason = "Best available match"
-          if (unit.property_id === tenant.property_id && (unit.status ?? "").toLowerCase() === "vacant") {
-            reason = "Same property + vacant now"
-          } else if ((unit.status ?? "").toLowerCase() === "vacant") {
-            reason = "Vacant now"
-          } else if ((unit.status ?? "").toLowerCase() === "make_ready") {
-            reason = "Make-ready candidate"
-          } else if ((unit.status ?? "").toLowerCase() === "notice") {
-            reason = "Notice unit could line up next"
-          }
-
-          const impactLabel =
-            (unit.status ?? "").toLowerCase() === "vacant"
-              ? "Prevents vacancy gap"
-              : "Keeps transfer options open"
-
-          return {
-            unit,
-            score,
-            reason,
-            impactLabel,
-          }
-        })
-        .sort((a, b) => {
-          if (b.score !== a.score) return b.score - a.score
-
-          const propertyA = propertyMap.get(a.unit.property_id)?.name ?? ""
-          const propertyB = propertyMap.get(b.unit.property_id)?.name ?? ""
-          if (propertyA !== propertyB) return propertyA.localeCompare(propertyB)
-
-          return a.unit.unit_number.localeCompare(b.unit.unit_number, undefined, {
-            numeric: true,
-            sensitivity: "base",
-          })
-        })
-
-      const best = candidates[0]
-      const fromProperty = propertyMap.get(tenant.property_id)
-      const fromUnit = unitMap.get(tenant.unit_id)
-      const suggestedProperty = best ? propertyMap.get(best.unit.property_id) : null
-
-      if (!best || !fromProperty || !fromUnit || !suggestedProperty) continue
-
-      suggestions.push({
-        tenantId: tenant.id,
-        tenantName: `${tenant.first_name} ${tenant.last_name}`,
-        fromPropertyName: fromProperty.name,
-        fromUnitNumber: fromUnit.unit_number,
-        suggestedPropertyId: best.unit.property_id,
-        suggestedPropertyName: suggestedProperty.name,
-        suggestedUnitId: best.unit.id,
-        suggestedUnitNumber: best.unit.unit_number,
-        suggestedUnitStatus: best.unit.status ?? null,
-        score: best.score,
-        reason: best.reason,
-        leaseRiskLabel: getLeaseRiskLabel(tenant.lease_end),
-        impactLabel: best.impactLabel,
-      })
-    }
-
-    return suggestions
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 6)
-  }, [scopedTenants, units, openTransfers, propertyMap, unitMap])
+  const selectedTenantLeaseDays = selectedTenant ? getDaysUntil(selectedTenant.lease_end) : null
+  const selectedTenantMoveVsLeaseLabel = selectedTenant
+    ? getMoveVsLeaseLabel(moveInDate, selectedTenant.lease_end)
+    : "Move timing vs lease unknown"
 
   const filteredTransfers = useMemo(() => {
     if (statusFilter === "all") return scopedTransfers
@@ -549,48 +530,6 @@ export default function TransfersPage() {
       .map(([unitId, group]) => ({ unitId, transfers: group }))
       .filter((group) => group.transfers.length > 1)
   }, [openTransfers])
-
-  const bestAvailableUnits = useMemo(() => {
-    const sourceUnits =
-      selectedPropertyId === ALL_PROPERTIES_VALUE ? units : scopedUnits
-
-    return sourceUnits
-      .filter((unit) =>
-        ["vacant", "make_ready", "notice"].includes((unit.status ?? "").toLowerCase())
-      )
-      .filter((unit) => !openTransfers.some((transfer) => transfer.to_unit_id === unit.id))
-      .sort((a, b) => {
-        const scoreDiff = getUnitPriorityScore(b.status) - getUnitPriorityScore(a.status)
-        if (scoreDiff !== 0) return scoreDiff
-
-        const propertyA = propertyMap.get(a.property_id)?.name ?? ""
-        const propertyB = propertyMap.get(b.property_id)?.name ?? ""
-
-        if (propertyA !== propertyB) return propertyA.localeCompare(propertyB)
-
-        return a.unit_number.localeCompare(b.unit_number, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        })
-      })
-      .slice(0, 6)
-  }, [units, scopedUnits, openTransfers, propertyMap, selectedPropertyId])
-
-  const tenantsWithOpenTransfers = useMemo(() => {
-    return openTransfers
-      .map((transfer) => tenantMap.get(transfer.tenant_id))
-      .filter((tenant): tenant is TenantRow => Boolean(tenant))
-  }, [openTransfers, tenantMap])
-
-  const noticeAndMakeReadyPool = useMemo(() => {
-    const sourceUnits =
-      selectedPropertyId === ALL_PROPERTIES_VALUE ? units : scopedUnits
-
-    return sourceUnits.filter((unit) => {
-      const status = (unit.status ?? "").toLowerCase()
-      return status === "notice" || status === "make_ready"
-    })
-  }, [units, scopedUnits, selectedPropertyId])
 
   const timingRiskTransfers = useMemo(() => {
     const results: TimingRiskItem[] = []
@@ -649,44 +588,6 @@ export default function TransfersPage() {
     return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "scheduled").length
   }, [scopedTransfers])
 
-  async function handleUseSuggestion(suggestion: SmartSuggestion) {
-    clearMessages()
-    setSuggestionLoadingTenantId(suggestion.tenantId)
-
-    const tenant = tenantMap.get(suggestion.tenantId)
-    if (tenant) {
-      setSelectedPropertyId(tenant.property_id)
-      setStoredSelectedPropertyId(tenant.property_id)
-    }
-
-    setSelectedTenantId(suggestion.tenantId)
-    setSelectedToPropertyId(suggestion.suggestedPropertyId)
-    setSelectedToUnitId(suggestion.suggestedUnitId)
-
-    const today = new Date()
-    const plusTwo = new Date(today)
-    plusTwo.setDate(today.getDate() + 2)
-    const plusThree = new Date(today)
-    plusThree.setDate(today.getDate() + 3)
-
-    const formatDate = (value: Date) => value.toISOString().slice(0, 10)
-
-    setRequestedDate(formatDate(today))
-    setMoveOutDate(formatDate(plusTwo))
-    setMoveInDate(formatDate(plusThree))
-    setNotes(
-      `Suggested transfer: ${suggestion.tenantName} from ${suggestion.fromPropertyName} Unit ${suggestion.fromUnitNumber} to ${suggestion.suggestedPropertyName} Unit ${suggestion.suggestedUnitNumber}.`
-    )
-
-    setSuggestionLoadingTenantId("")
-    setSuccessMessage("Suggestion applied. Review dates and create the transfer.")
-
-    setTimeout(() => {
-      const formSection = document.getElementById("create-transfer-form")
-      formSection?.scrollIntoView({ behavior: "smooth", block: "start" })
-    }, 50)
-  }
-
   async function handleCreateTransfer(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     clearMessages()
@@ -704,6 +605,15 @@ export default function TransfersPage() {
     if (!selectedToUnitId) {
       setErrorMessage("Select a destination unit.")
       return
+    }
+
+    if (moveOutDate && moveInDate) {
+      const gap = getDateDiffInDays(moveOutDate, moveInDate)
+
+      if (gap !== null && gap < 0) {
+        setErrorMessage("Move-in date cannot be before move-out date.")
+        return
+      }
     }
 
     setSubmitting(true)
@@ -840,7 +750,7 @@ export default function TransfersPage() {
           <p className="mt-2 text-zinc-400">
             {selectedProperty
               ? `Coordinate internal resident moves for ${selectedProperty.name}.`
-              : "Coordinate internal resident moves, reduce vacancy risk, and keep every handoff visible."}
+              : "Create and track tenant-requested transfers across your properties."}
           </p>
         </div>
 
@@ -878,97 +788,8 @@ export default function TransfersPage() {
           {selectedProperty ? selectedProperty.name : "All Properties"}
         </p>
         <p className="mt-2 text-sm text-zinc-500">
-          Transfer list and pipeline are scoped by the tenant’s current property.
+          Transfers are organized by the tenant’s current property.
         </p>
-      </div>
-
-      <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Smart Transfer Suggestions</h2>
-            <p className="mt-1 text-sm text-zinc-400">
-              Recommended actions based on lease timing, notice risk, and live unit availability.
-            </p>
-          </div>
-          <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-sm text-zinc-300">
-            {smartSuggestions.length} suggestion{smartSuggestions.length === 1 ? "" : "s"}
-          </div>
-        </div>
-
-        <div className="mt-4 space-y-3">
-          {smartSuggestions.length === 0 ? (
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
-              No transfer opportunities need attention right now. Add lease end dates or place tenants on notice to generate recommendations.
-            </div>
-          ) : (
-            smartSuggestions.map((suggestion) => (
-              <div
-                key={`${suggestion.tenantId}-${suggestion.suggestedUnitId}`}
-                className="rounded-xl border border-white/10 bg-black/20 p-4"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-medium text-white">
-                        {suggestion.tenantName} — HIGH PRIORITY
-                      </p>
-                      <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs text-amber-300">
-                        {suggestion.leaseRiskLabel}
-                      </span>
-                    </div>
-
-                    <div className="mt-3 space-y-1 text-sm text-zinc-300">
-                      <p>
-                        <span className="text-zinc-500">Risk:</span>{" "}
-                        {suggestion.leaseRiskLabel === "Longer runway"
-                          ? "Tenant movement opportunity identified"
-                          : suggestion.leaseRiskLabel}
-                      </p>
-                      <p>
-                        <span className="text-zinc-500">Opportunity:</span>{" "}
-                        {suggestion.suggestedPropertyName} • Unit {suggestion.suggestedUnitNumber} ({formatUnitStatus(suggestion.suggestedUnitStatus)})
-                      </p>
-                      <p>
-                        <span className="text-zinc-500">Impact:</span> {suggestion.impactLabel}
-                      </p>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-zinc-300">
-                        Current: {suggestion.fromPropertyName} • Unit {suggestion.fromUnitNumber}
-                      </span>
-                      <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-xs text-blue-300">
-                        {suggestion.reason}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleUseSuggestion(suggestion)}
-                      disabled={suggestionLoadingTenantId === suggestion.tenantId}
-                      className="rounded border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-60"
-                    >
-                      View Details
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleUseSuggestion(suggestion)}
-                      disabled={suggestionLoadingTenantId === suggestion.tenantId}
-                      className="rounded bg-blue-600 px-3 py-2 text-sm hover:bg-blue-700 disabled:opacity-60"
-                    >
-                      {suggestionLoadingTenantId === suggestion.tenantId
-                        ? "Applying..."
-                        : "Move"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       </div>
 
       <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5">
@@ -1012,175 +833,11 @@ export default function TransfersPage() {
             <p className="mt-2 text-xs text-zinc-300/80">View history</p>
           </div>
         </div>
-
-        <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-4">
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-            <p className="text-sm font-medium text-amber-200">Requested Queue</p>
-            <div className="mt-3 space-y-2">
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "requested").slice(0, 4).map((transfer) => {
-                const tenant = tenantMap.get(transfer.tenant_id)
-                return (
-                  <div
-                    key={transfer.id}
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {tenant ? `${tenant.first_name} ${tenant.last_name}` : "Unknown Tenant"}
-                  </div>
-                )
-              })}
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "requested").length === 0 ? (
-                <p className="text-sm text-zinc-500">Nothing waiting.</p>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-            <p className="text-sm font-medium text-emerald-200">Approved Queue</p>
-            <div className="mt-3 space-y-2">
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "approved").slice(0, 4).map((transfer) => {
-                const tenant = tenantMap.get(transfer.tenant_id)
-                return (
-                  <div
-                    key={transfer.id}
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {tenant ? `${tenant.first_name} ${tenant.last_name}` : "Unknown Tenant"}
-                  </div>
-                )
-              })}
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "approved").length === 0 ? (
-                <p className="text-sm text-zinc-500">Nothing approved.</p>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-            <p className="text-sm font-medium text-blue-200">Scheduled Queue</p>
-            <div className="mt-3 space-y-2">
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "scheduled").slice(0, 4).map((transfer) => {
-                const tenant = tenantMap.get(transfer.tenant_id)
-                return (
-                  <div
-                    key={transfer.id}
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {tenant ? `${tenant.first_name} ${tenant.last_name}` : "Unknown Tenant"}
-                  </div>
-                )
-              })}
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "scheduled").length === 0 ? (
-                <p className="text-sm text-zinc-500">Nothing scheduled.</p>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-            <p className="text-sm font-medium text-zinc-200">Recently Completed</p>
-            <div className="mt-3 space-y-2">
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "completed").slice(0, 4).map((transfer) => {
-                const tenant = tenantMap.get(transfer.tenant_id)
-                return (
-                  <div
-                    key={transfer.id}
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {tenant ? `${tenant.first_name} ${tenant.last_name}` : "Unknown Tenant"}
-                  </div>
-                )
-              })}
-              {scopedTransfers.filter((t) => getPipelineStage(t) === "completed").length === 0 ? (
-                <p className="text-sm text-zinc-500">Nothing completed yet.</p>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="rounded-xl border border-white/10 bg-white/5 p-5">
-          <h2 className="text-lg font-semibold">Transfer Intelligence</h2>
-          <div className="mt-4 space-y-3">
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <p className="text-sm text-zinc-400">Conflicting Destinations</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{conflictGroups.length}</p>
-              <p className="mt-1 text-sm text-zinc-500">
-                {conflictGroups.length === 0
-                  ? "No conflicts detected"
-                  : "Destination units targeted by more than one open transfer"}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <p className="text-sm text-zinc-400">Tenants in Motion</p>
-              <p className="mt-2 text-2xl font-semibold text-white">
-                {tenantsWithOpenTransfers.length}
-              </p>
-              <p className="mt-1 text-sm text-zinc-500">
-                {tenantsWithOpenTransfers.length === 0
-                  ? "No transfers currently moving"
-                  : "Tenants with requested or approved transfers"}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <p className="text-sm text-zinc-400">Ready Pool</p>
-              <p className="mt-2 text-2xl font-semibold text-white">
-                {noticeAndMakeReadyPool.length}
-              </p>
-              <p className="mt-1 text-sm text-zinc-500">
-                {noticeAndMakeReadyPool.length === 0
-                  ? "No immediate backup options"
-                  : `${noticeAndMakeReadyPool.length} unit${noticeAndMakeReadyPool.length === 1 ? "" : "s"} ready for immediate transfer planning`}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-white/10 bg-white/5 p-5 xl:col-span-2">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Best Units for Immediate Transfers</h2>
-              <p className="mt-1 text-sm text-zinc-400">
-                Use these when resolving tenant risk or creating a transfer now.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-            {bestAvailableUnits.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
-                No strong destination candidates right now.
-              </div>
-            ) : (
-              bestAvailableUnits.map((unit) => {
-                const property = propertyMap.get(unit.property_id)
-
-                return (
-                  <div
-                    key={unit.id}
-                    className="rounded-xl border border-white/10 bg-black/20 p-4"
-                  >
-                    <p className="font-medium text-white">
-                      {property?.name ?? "Unknown Property"} • Unit {unit.unit_number}
-                    </p>
-                    <div
-                      className={`mt-2 inline-flex rounded-full border px-3 py-1 text-xs ${getUnitStatusClasses(
-                        unit.status
-                      )}`}
-                    >
-                      {formatUnitStatus(unit.status)}
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
-        </div>
       </div>
 
       {timingRiskTransfers.length > 0 ? (
         <div className="mt-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-5">
-          <h2 className="text-lg font-semibold text-amber-200">Vacancy Risk Watchlist</h2>
+          <h2 className="text-lg font-semibold text-amber-200">Timing Watchlist</h2>
           <div className="mt-4 space-y-3">
             {timingRiskTransfers.map(({ transfer, risk, gapDays }) => {
               const tenant = tenantMap.get(transfer.tenant_id)
@@ -1257,182 +914,13 @@ export default function TransfersPage() {
         </div>
       ) : null}
 
-      <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setStatusFilter("all")}
-            className={`rounded-full border px-4 py-2 text-sm ${
-              statusFilter === "all"
-                ? "border-white/20 bg-white/10 text-white"
-                : "border-zinc-700 bg-black/30 text-zinc-400"
-            }`}
-          >
-            All ({scopedTransfers.length})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("requested")}
-            className={`rounded-full border px-4 py-2 text-sm ${
-              statusFilter === "requested"
-                ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
-                : "border-zinc-700 bg-black/30 text-zinc-400"
-            }`}
-          >
-            Requested ({requestedCount})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("approved")}
-            className={`rounded-full border px-4 py-2 text-sm ${
-              statusFilter === "approved"
-                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-                : "border-zinc-700 bg-black/30 text-zinc-400"
-            }`}
-          >
-            Approved ({approvedCount})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("completed")}
-            className={`rounded-full border px-4 py-2 text-sm ${
-              statusFilter === "completed"
-                ? "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
-                : "border-zinc-700 bg-black/30 text-zinc-400"
-            }`}
-          >
-            Completed ({completedCount})
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-8 space-y-4">
-        {filteredTransfers.map((transfer) => {
-          const tenant = tenantMap.get(transfer.tenant_id)
-          const fromProperty = propertyMap.get(transfer.from_property_id)
-          const toProperty = propertyMap.get(transfer.to_property_id)
-          const fromUnit = unitMap.get(transfer.from_unit_id)
-          const toUnit = unitMap.get(transfer.to_unit_id)
-
-          const stage = getPipelineStage(transfer)
-
-          return (
-            <div
-              key={transfer.id}
-              className="rounded-xl border border-zinc-800 bg-zinc-900 p-5"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-xl font-medium">
-                    {tenant
-                      ? `${tenant.first_name} ${tenant.last_name}`
-                      : "Unknown Tenant"}
-                  </h2>
-
-                  <p className="mt-2 text-zinc-300">
-                    {fromProperty?.name ?? "Unknown Property"} Unit{" "}
-                    {fromUnit?.unit_number ?? "?"} → {toProperty?.name ?? "Unknown Property"} Unit{" "}
-                    {toUnit?.unit_number ?? "?"}
-                  </p>
-
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
-                      Requested: {transfer.requested_date ?? "—"}
-                    </span>
-
-                    {transfer.approved_date ? (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
-                        Approved: {transfer.approved_date}
-                      </span>
-                    ) : null}
-
-                    {transfer.move_out_date || transfer.move_in_date ? (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
-                        Timing: {transfer.move_out_date ?? "—"} → {transfer.move_in_date ?? "—"}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  <div className="mt-3 flex items-center gap-2 text-xs">
-                    <span
-                      className={`rounded-full border px-3 py-1 ${
-                        stage === "requested"
-                          ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
-                          : stage === "approved"
-                          ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-                          : stage === "scheduled"
-                          ? "border-blue-500/20 bg-blue-500/10 text-blue-300"
-                          : "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
-                      }`}
-                    >
-                      {stage === "requested"
-                        ? "Review needed"
-                        : stage === "approved"
-                        ? "Ready to schedule"
-                        : stage === "scheduled"
-                        ? "Move timing set"
-                        : "Completed"}
-                    </span>
-                  </div>
-
-                  {transfer.notes ? (
-                    <p className="mt-3 text-sm text-zinc-400">{transfer.notes}</p>
-                  ) : null}
-                </div>
-
-                <div className="flex flex-col items-end gap-3">
-                  <div
-                    className={`rounded-full border px-3 py-1 text-sm capitalize ${getTransferStatusClasses(
-                      transfer.status
-                    )}`}
-                  >
-                    {transfer.status}
-                  </div>
-
-                  {transfer.status.toLowerCase() === "requested" ? (
-                    <button
-                      type="button"
-                      onClick={() => handleApproveTransfer(transfer.id)}
-                      disabled={actionLoadingId === transfer.id}
-                      className="rounded bg-emerald-600 px-3 py-2 text-sm hover:bg-emerald-700 disabled:opacity-60"
-                    >
-                      {actionLoadingId === transfer.id ? "Approving..." : "Approve Transfer"}
-                    </button>
-                  ) : null}
-
-                  {transfer.status.toLowerCase() === "approved" ? (
-                    <button
-                      type="button"
-                      onClick={() => handleCompleteTransfer(transfer.id)}
-                      disabled={actionLoadingId === transfer.id}
-                      className="rounded bg-blue-600 px-3 py-2 text-sm hover:bg-blue-700 disabled:opacity-60"
-                    >
-                      {actionLoadingId === transfer.id ? "Completing..." : "Complete Transfer"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          )
-        })}
-
-        {filteredTransfers.length === 0 ? (
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5 text-zinc-400">
-            No transfers found for this filter.
-          </div>
-        ) : null}
-      </div>
-
       <div
         id="create-transfer-form"
         className="mt-6 rounded-xl border border-white/10 bg-white/5 p-6"
       >
         <h2 className="mb-1 text-xl font-semibold">Create Transfer Request</h2>
         <p className="mb-4 text-sm text-zinc-400">
-          Use this when you need to create a transfer manually. Suggestions above will pre-fill this form when available.
+          Select the tenant who wants to move, choose the destination, and compare unit timing to the requested move date.
         </p>
 
         <form onSubmit={handleCreateTransfer} className="grid grid-cols-1 gap-4">
@@ -1459,9 +947,20 @@ export default function TransfersPage() {
               required
               value={selectedTenantId}
               onChange={(e) => {
-                setSelectedTenantId(e.target.value)
-                setSelectedToPropertyId(selectedPropertyId === ALL_PROPERTIES_VALUE ? "" : selectedPropertyId)
+                const nextTenantId = e.target.value
+                setSelectedTenantId(nextTenantId)
+                setSelectedToPropertyId(
+                  selectedPropertyId === ALL_PROPERTIES_VALUE ? "" : selectedPropertyId
+                )
                 setSelectedToUnitId("")
+
+                if (nextTenantId) {
+                  setDefaultTransferDates()
+                } else {
+                  setRequestedDate("")
+                  setMoveOutDate("")
+                  setMoveInDate("")
+                }
               }}
             >
               <option value="">Select Tenant</option>
@@ -1493,36 +992,84 @@ export default function TransfersPage() {
 
           {selectedTenant ? (
             <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
-              <p className="text-sm font-medium text-amber-200">Lease Timing</p>
-              <p className="mt-1 text-sm text-zinc-100">
-                {getLeaseRiskLabel(selectedTenant.lease_end)}
-              </p>
+              <p className="text-sm font-medium text-amber-200">Selected Tenant Lease Summary</p>
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Status</p>
+                  <p className="mt-1 text-sm text-zinc-100 capitalize">
+                    {formatTenantStatus(selectedTenant.status)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Lease Timing</p>
+                  <p className="mt-1 text-sm text-zinc-100">
+                    {getLeaseRiskLabel(selectedTenant.lease_end)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Lease Start</p>
+                  <p className="mt-1 text-sm text-zinc-100">
+                    {formatDateValue(selectedTenant.lease_start)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Lease End</p>
+                  <p className="mt-1 text-sm text-zinc-100">
+                    {formatDateValue(selectedTenant.lease_end)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Days Until Lease End</p>
+                  <p className="mt-1 text-sm text-zinc-100">
+                    {selectedTenantLeaseDays === null
+                      ? "Unknown"
+                      : `${selectedTenantLeaseDays} day(s)`}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs uppercase tracking-wide text-zinc-400">Move vs Lease</p>
+                  <p className="mt-1 text-sm text-zinc-100">
+                    {selectedTenantMoveVsLeaseLabel}
+                  </p>
+                </div>
+              </div>
             </div>
           ) : null}
 
-          {selectedTenant && recommendedDestinationUnit ? (
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-              <p className="text-sm font-medium text-emerald-200">Recommended Destination</p>
-              <p className="mt-1 text-sm text-zinc-100">
-                {propertyMap.get(recommendedDestinationUnit.property_id)?.name ?? "Unknown Property"} • Unit{" "}
-                {recommendedDestinationUnit.unit_number}
-              </p>
-              <p className="mt-1 text-xs text-zinc-300">
-                Status: {formatUnitStatus(recommendedDestinationUnit.status)}
-              </p>
+          <div>
+            <label className="mb-1 block text-sm text-zinc-400">Requested Date</label>
+            <input
+              type="date"
+              value={requestedDate}
+              onChange={(e) => setRequestedDate(e.target.value)}
+              className="w-full rounded bg-black p-2"
+            />
+          </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedToPropertyId(recommendedDestinationUnit.property_id)
-                  setSelectedToUnitId(recommendedDestinationUnit.id)
-                }}
-                className="mt-3 rounded bg-emerald-600 px-3 py-2 text-sm hover:bg-emerald-700"
-              >
-                Use Recommendation
-              </button>
-            </div>
-          ) : null}
+          <div>
+            <label className="mb-1 block text-sm text-zinc-400">Move Out Date</label>
+            <input
+              type="date"
+              value={moveOutDate}
+              onChange={(e) => setMoveOutDate(e.target.value)}
+              className="w-full rounded bg-black p-2"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm text-zinc-400">Move In Date</label>
+            <input
+              type="date"
+              value={moveInDate}
+              onChange={(e) => setMoveInDate(e.target.value)}
+              className="w-full rounded bg-black p-2"
+            />
+          </div>
 
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Destination Property</label>
@@ -1557,54 +1104,60 @@ export default function TransfersPage() {
                 {!selectedToPropertyId
                   ? "Select Destination Property First"
                   : destinationUnits.length === 0
-                  ? "No available units"
-                  : "Select Destination Unit"}
+                    ? "No available units"
+                    : "Select Destination Unit"}
               </option>
 
               {destinationUnits.map((unit) => (
                 <option key={unit.id} value={unit.id}>
-                  Unit {unit.unit_number} — {formatUnitStatus(unit.status)}
+                  Unit {unit.unit_number} — {formatUnitStatus(unit.status)} | Available:{" "}
+                  {formatShortDate(unit.expectedDate)} | {unit.label}
+                  {unit.gap !== null ? ` (${unit.gap} days)` : ""}
                 </option>
               ))}
             </select>
           </div>
 
-          <div>
-            <label className="mb-1 block text-sm text-zinc-400">Requested Date</label>
-            <input
-              value={requestedDate}
-              onChange={(e) => setRequestedDate(e.target.value)}
-              placeholder="YYYY-MM-DD"
-              className="w-full rounded bg-black p-2"
-            />
-          </div>
+          {selectedToPropertyId && destinationUnits.length > 0 ? (
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="text-sm font-medium text-zinc-200">Timing Preview</p>
+              <div className="mt-3 space-y-2">
+                {destinationUnits.slice(0, 5).map((unit) => (
+                  <div
+                    key={`${unit.id}-preview`}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
+                  >
+                    Unit {unit.unit_number} • {formatUnitStatus(unit.status)} • Available{" "}
+                    {formatShortDate(unit.expectedDate)} • {unit.label}
+                    {unit.gap !== null ? ` (${unit.gap} days)` : ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
-          <div>
-            <label className="mb-1 block text-sm text-zinc-400">Move Out Date</label>
-            <input
-              value={moveOutDate}
-              onChange={(e) => setMoveOutDate(e.target.value)}
-              placeholder="YYYY-MM-DD"
-              className="w-full rounded bg-black p-2"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm text-zinc-400">Move In Date</label>
-            <input
-              value={moveInDate}
-              onChange={(e) => setMoveInDate(e.target.value)}
-              placeholder="YYYY-MM-DD"
-              className="w-full rounded bg-black p-2"
-            />
-          </div>
+          {selectedDestinationUnit ? (
+            <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4">
+              <p className="text-sm font-medium text-blue-200">Selected Unit Timing</p>
+              <p className="mt-1 text-sm text-zinc-100">
+                Unit {selectedDestinationUnit.unit_number} is expected to be available{" "}
+                {formatShortDate(selectedDestinationUnit.expectedDate)}.
+              </p>
+              <p className="mt-1 text-sm text-zinc-100">
+                Match: {selectedDestinationUnit.label}
+                {selectedDestinationUnit.gap !== null
+                  ? ` (${selectedDestinationUnit.gap} days from requested move date)`
+                  : ""}
+              </p>
+            </div>
+          ) : null}
 
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Notes</label>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Notes"
+              placeholder="Reason for move, tenant request details, timing notes, etc."
               className="w-full rounded bg-black p-2"
               rows={3}
             />
