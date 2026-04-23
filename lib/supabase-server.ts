@@ -24,7 +24,7 @@ export async function createClient() {
               cookieStore.set(name, value, options)
             })
           } catch {
-            // ignore errors in edge environments
+            // ignore
           }
         },
       },
