@@ -33,24 +33,22 @@ export default function AppLayout({
 
       setUserEmail(user.email ?? "")
 
-      const { data: profile, error: profileError } = await supabaseClient
-        .from("profiles")
-        .select("user_id")
-        .eq("user_id", user.id)
-        .maybeSingle()
+      // 🔴 REAL SECURITY CHECK (staff only)
+      const { data: membership, error: membershipError } =
+        await supabaseClient
+          .from("organization_members")
+          .select("id")
+          .eq("user_id", user.id)
+          .maybeSingle()
 
-      if (profileError) {
+      if (membershipError) {
         router.replace("/login")
         return
       }
 
-      if (!profile && pathname !== "/create-profile") {
-        router.replace("/create-profile")
-        return
-      }
-
-      if (profile && pathname === "/create-profile") {
-        router.replace("/dashboard")
+      if (!membership) {
+        // 🚫 NOT STAFF → block access
+        router.replace("/tenant")
         return
       }
 

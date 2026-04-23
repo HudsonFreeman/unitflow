@@ -50,24 +50,15 @@ export async function POST(request: NextRequest) {
     }
 
     if (!isValidDateString(requested_date)) {
-      return NextResponse.json(
-        { error: "Requested date is invalid." },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: "Requested date is invalid." }, { status: 400 })
     }
 
     if (!isValidDateString(move_out_date)) {
-      return NextResponse.json(
-        { error: "Move-out date is invalid." },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: "Move-out date is invalid." }, { status: 400 })
     }
 
     if (!isValidDateString(move_in_date)) {
-      return NextResponse.json(
-        { error: "Move-in date is invalid." },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: "Move-in date is invalid." }, { status: 400 })
     }
 
     if (move_out_date && move_in_date) {
@@ -93,9 +84,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 })
     }
 
+    // 🔴 STRICT TENANT CHECK
     const { data: tenant, error: tenantError } = await supabase
       .from("tenants")
-      .select("id, property_id, unit_id, status, lease_end")
+      .select("id, organization_id, property_id, unit_id, status, lease_end")
       .eq("user_id", user.id)
       .single()
 
@@ -120,10 +112,27 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const organizationId = tenant.organization_id
+
+    const { data: destinationProperty, error: propertyError } = await supabase
+      .from("properties")
+      .select("id, organization_id")
+      .eq("id", to_property_id)
+      .eq("organization_id", organizationId)
+      .single()
+
+    if (propertyError || !destinationProperty) {
+      return NextResponse.json(
+        { error: "Destination property not found." },
+        { status: 404 }
+      )
+    }
+
     const { data: destinationUnit, error: destinationUnitError } = await supabase
       .from("units")
-      .select("id, property_id, status")
+      .select("id, property_id, organization_id, status")
       .eq("id", to_unit_id)
+      .eq("organization_id", organizationId)
       .single()
 
     if (destinationUnitError || !destinationUnit) {
@@ -151,19 +160,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { data: existingTenantTransfer, error: existingTenantTransferError } = await supabase
+    const { data: existingTenantTransfer } = await supabase
       .from("transfers")
       .select("id")
       .eq("tenant_id", tenant.id)
+      .eq("organization_id", organizationId)
       .in("status", OPEN_TRANSFER_STATUSES)
       .maybeSingle()
-
-    if (existingTenantTransferError) {
-      return NextResponse.json(
-        { error: existingTenantTransferError.message },
-        { status: 500 }
-      )
-    }
 
     if (existingTenantTransfer) {
       return NextResponse.json(
@@ -172,20 +175,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { data: existingDestinationTransfer, error: existingDestinationTransferError } =
-      await supabase
-        .from("transfers")
-        .select("id")
-        .eq("to_unit_id", to_unit_id)
-        .in("status", OPEN_TRANSFER_STATUSES)
-        .maybeSingle()
-
-    if (existingDestinationTransferError) {
-      return NextResponse.json(
-        { error: existingDestinationTransferError.message },
-        { status: 500 }
-      )
-    }
+    const { data: existingDestinationTransfer } = await supabase
+      .from("transfers")
+      .select("id")
+      .eq("to_unit_id", to_unit_id)
+      .eq("organization_id", organizationId)
+      .in("status", OPEN_TRANSFER_STATUSES)
+      .maybeSingle()
 
     if (existingDestinationTransfer) {
       return NextResponse.json(
@@ -194,20 +190,14 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { data: destinationOccupant, error: destinationOccupantError } = await supabase
+    const { data: destinationOccupant } = await supabase
       .from("tenants")
       .select("id, lease_end, status")
       .eq("unit_id", to_unit_id)
+      .eq("organization_id", organizationId)
       .neq("id", tenant.id)
       .not("status", "in", '("moved_out","transferred")')
       .maybeSingle()
-
-    if (destinationOccupantError) {
-      return NextResponse.json(
-        { error: destinationOccupantError.message },
-        { status: 500 }
-      )
-    }
 
     if (destinationOccupant && move_in_date && destinationOccupant.lease_end) {
       const requestedMoveIn = new Date(move_in_date)
@@ -234,12 +224,15 @@ export async function POST(request: NextRequest) {
       .from("transfers")
       .insert([
         {
+          organization_id: organizationId,
           tenant_id: tenant.id,
           from_property_id: tenant.property_id,
           from_unit_id: tenant.unit_id,
           to_property_id,
           to_unit_id,
-          requested_date: getDateOnlyString(requested_date) || new Date().toISOString().slice(0, 10),
+          requested_date:
+            getDateOnlyString(requested_date) ||
+            new Date().toISOString().slice(0, 10),
           move_out_date: getDateOnlyString(move_out_date),
           move_in_date: getDateOnlyString(move_in_date),
           notes: noteText,

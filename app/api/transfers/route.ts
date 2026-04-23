@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase-server"
-import { getCurrentOrganizationContext } from "@/lib/current-organization"
 
 const OPEN_TRANSFER_STATUSES = ["requested", "approved", "scheduled"]
 
@@ -23,14 +22,42 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const currentOrg = await getCurrentOrganizationContext()
     const supabase = await createClient()
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser()
+
+    if (userError || !user) {
+      return NextResponse.json({ error: "Unauthorized." }, { status: 401 })
+    }
+
+    // STAFF-ONLY CHECK
+    const { data: membership, error: membershipError } = await supabase
+      .from("organization_members")
+      .select("id, organization_id")
+      .eq("user_id", user.id)
+      .maybeSingle()
+
+    if (membershipError) {
+      return NextResponse.json({ error: membershipError.message }, { status: 500 })
+    }
+
+    if (!membership) {
+      return NextResponse.json(
+        { error: "Forbidden. Staff access required." },
+        { status: 403 }
+      )
+    }
+
+    const organizationId = membership.organization_id
 
     const { data: tenant, error: tenantError } = await supabase
       .from("tenants")
-      .select("id, organization_id, property_id, unit_id, status")
+      .select("id, organization_id, property_id, unit_id, status, lease_end")
       .eq("id", tenant_id)
-      .eq("organization_id", currentOrg.organizationId)
+      .eq("organization_id", organizationId)
       .single()
 
     if (tenantError || !tenant) {
@@ -55,7 +82,7 @@ export async function POST(request: NextRequest) {
       .from("properties")
       .select("id, organization_id")
       .eq("id", to_property_id)
-      .eq("organization_id", currentOrg.organizationId)
+      .eq("organization_id", organizationId)
       .single()
 
     if (destinationPropertyError || !destinationProperty) {
@@ -69,7 +96,7 @@ export async function POST(request: NextRequest) {
       .from("units")
       .select("id, organization_id, property_id, status")
       .eq("id", to_unit_id)
-      .eq("organization_id", currentOrg.organizationId)
+      .eq("organization_id", organizationId)
       .single()
 
     if (destinationUnitError || !destinationUnit) {
@@ -83,7 +110,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (!["vacant", "make_ready", "notice"].includes((destinationUnit.status ?? "").toLowerCase())) {
+    if (
+      !["vacant", "make_ready", "notice"].includes(
+        (destinationUnit.status ?? "").toLowerCase()
+      )
+    ) {
       return NextResponse.json(
         { error: "Destination unit is not available." },
         { status: 400 }
@@ -94,7 +125,7 @@ export async function POST(request: NextRequest) {
       .from("transfers")
       .select("id")
       .eq("tenant_id", tenant_id)
-      .eq("organization_id", currentOrg.organizationId)
+      .eq("organization_id", organizationId)
       .in("status", OPEN_TRANSFER_STATUSES)
       .maybeSingle()
 
@@ -109,7 +140,7 @@ export async function POST(request: NextRequest) {
       .from("transfers")
       .select("id")
       .eq("to_unit_id", to_unit_id)
-      .eq("organization_id", currentOrg.organizationId)
+      .eq("organization_id", organizationId)
       .in("status", OPEN_TRANSFER_STATUSES)
       .maybeSingle()
 
@@ -122,7 +153,7 @@ export async function POST(request: NextRequest) {
 
     const { error: insertError } = await supabase.from("transfers").insert([
       {
-        organization_id: currentOrg.organizationId,
+        organization_id: organizationId,
         tenant_id,
         from_property_id: tenant.property_id,
         from_unit_id: tenant.unit_id,
@@ -133,7 +164,7 @@ export async function POST(request: NextRequest) {
         move_in_date: move_in_date || null,
         notes: notes || null,
         status: "requested",
-        created_by: currentOrg.userId,
+        created_by: user.id,
       },
     ])
 

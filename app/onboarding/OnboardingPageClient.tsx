@@ -10,6 +10,11 @@ type MembershipRow = {
   role: string | null
 }
 
+type TenantRow = {
+  id: string
+  user_id: string | null
+}
+
 export default function OnboardingPageClient() {
   const router = useRouter()
 
@@ -19,7 +24,7 @@ export default function OnboardingPageClient() {
   const [message, setMessage] = useState("")
 
   useEffect(() => {
-    async function checkExistingMembership() {
+    async function checkAccess() {
       const {
         data: { user },
         error: userError,
@@ -30,11 +35,25 @@ export default function OnboardingPageClient() {
         return
       }
 
-      const { data: membershipRows, error: membershipError } = await supabaseClient
-        .from("organization_members")
-        .select("id, organization_id, role")
+      // 🔴 BLOCK TENANTS FROM EVER ACCESSING ONBOARDING
+      const { data: tenant } = await supabaseClient
+        .from("tenants")
+        .select("id, user_id")
         .eq("user_id", user.id)
-        .limit(1)
+        .maybeSingle()
+
+      if (tenant) {
+        router.replace("/tenant")
+        return
+      }
+
+      // 🔴 CHECK IF ALREADY STAFF
+      const { data: membershipRows, error: membershipError } =
+        await supabaseClient
+          .from("organization_members")
+          .select("id, organization_id, role")
+          .eq("user_id", user.id)
+          .limit(1)
 
       if (membershipError) {
         setMessage(membershipError.message)
@@ -52,7 +71,7 @@ export default function OnboardingPageClient() {
       setLoading(false)
     }
 
-    checkExistingMembership()
+    checkAccess()
   }, [router])
 
   async function handleCreateOrganization(e: React.FormEvent<HTMLFormElement>) {
@@ -80,20 +99,25 @@ export default function OnboardingPageClient() {
         return
       }
 
-      const { data: existingMembershipRows, error: existingMembershipError } =
-        await supabaseClient
-          .from("organization_members")
-          .select("id, organization_id, role")
-          .eq("user_id", user.id)
-          .limit(1)
+      // 🔴 SAFETY: BLOCK TENANTS AGAIN (server-side safety)
+      const { data: tenant } = await supabaseClient
+        .from("tenants")
+        .select("id")
+        .eq("user_id", user.id)
+        .maybeSingle()
 
-      if (existingMembershipError) {
-        setMessage(existingMembershipError.message)
-        setSubmitting(false)
+      if (tenant) {
+        router.replace("/tenant")
         return
       }
 
-      const existingMembership = (existingMembershipRows?.[0] ?? null) as MembershipRow | null
+      const { data: existingMembershipRows } = await supabaseClient
+        .from("organization_members")
+        .select("id")
+        .eq("user_id", user.id)
+        .limit(1)
+
+      const existingMembership = existingMembershipRows?.[0] ?? null
 
       if (existingMembership) {
         router.replace("/dashboard")
