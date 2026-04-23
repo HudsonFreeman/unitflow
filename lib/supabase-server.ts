@@ -18,8 +18,7 @@ export async function createClient() {
               cookieStore.set(name, value, options)
             })
           } catch {
-            // This can fail in some server component contexts.
-            // Route handlers can still use it correctly.
+            // ignore in server components
           }
         },
       },

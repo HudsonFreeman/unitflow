@@ -3,12 +3,69 @@
 import { useState } from "react"
 import { supabaseClient } from "@/lib/supabase-client"
 
+type AccountType = "staff" | "resident"
+type AuthMode = "login" | "signup"
+
+async function hasStaffOrganizationMembership() {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabaseClient.auth.getUser()
+
+  if (userError || !user) {
+    throw new Error("You must be logged in.")
+  }
+
+  const { data, error } = await supabaseClient
+    .from("organization_members")
+    .select("id")
+    .eq("user_id", user.id)
+    .limit(1)
+
+  if (error) {
+    throw new Error(error.message)
+  }
+
+  return Array.isArray(data) && data.length > 0
+}
+
 export default function LoginPageClient() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
-  const [mode, setMode] = useState<"login" | "signup">("login")
+  const [mode, setMode] = useState<AuthMode>("login")
+  const [accountType, setAccountType] = useState<AccountType>("staff")
   const [message, setMessage] = useState("")
   const [loading, setLoading] = useState(false)
+
+  async function linkTenantAccount() {
+    const response = await fetch("/api/tenant/link", {
+      method: "POST",
+    })
+
+    const result = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      throw new Error(result?.error || "Failed to link resident account.")
+    }
+
+    return result
+  }
+
+  async function handleResidentPostAuth() {
+    await linkTenantAccount()
+    window.location.assign("/tenant")
+  }
+
+  async function handleStaffPostAuth() {
+    const hasMembership = await hasStaffOrganizationMembership()
+
+    if (hasMembership) {
+      window.location.assign("/dashboard")
+      return
+    }
+
+    window.location.assign("/onboarding")
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -17,37 +74,88 @@ export default function LoginPageClient() {
 
     try {
       if (mode === "signup") {
-        const { error } = await supabaseClient.auth.signUp({
+        const { error: signUpError } = await supabaseClient.auth.signUp({
           email,
           password,
         })
 
-        if (error) {
-          setMessage(error.message)
+        if (signUpError) {
+          setMessage(signUpError.message)
           setLoading(false)
           return
         }
 
-        await supabaseClient.auth.getSession()
-        window.location.assign("/dashboard")
+        const {
+          data: { session },
+        } = await supabaseClient.auth.getSession()
+
+        if (accountType === "resident") {
+          if (!session) {
+            setMessage(
+              "Resident account created. Now log in with the same email and password."
+            )
+            setMode("login")
+            setLoading(false)
+            return
+          }
+
+          try {
+            await handleResidentPostAuth()
+            return
+          } catch (residentError) {
+            await supabaseClient.auth.signOut()
+            setMessage(
+              residentError instanceof Error
+                ? residentError.message
+                : "Resident account was created, but no matching resident record was found."
+            )
+            setMode("login")
+            setLoading(false)
+            return
+          }
+        }
+
+        if (!session) {
+          setMessage("Staff account created. Now log in with the same email and password.")
+          setMode("login")
+          setLoading(false)
+          return
+        }
+
+        await handleStaffPostAuth()
         return
       }
 
-      const { error } = await supabaseClient.auth.signInWithPassword({
+      const { error: signInError } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       })
 
-      if (error) {
-        setMessage(error.message)
+      if (signInError) {
+        setMessage(signInError.message)
         setLoading(false)
         return
       }
 
-      await supabaseClient.auth.getSession()
-      window.location.assign("/dashboard")
-    } catch {
-      setMessage("Something went wrong.")
+      if (accountType === "resident") {
+        try {
+          await handleResidentPostAuth()
+          return
+        } catch (residentError) {
+          await supabaseClient.auth.signOut()
+          setMessage(
+            residentError instanceof Error
+              ? residentError.message
+              : "No resident account found for this login."
+          )
+          setLoading(false)
+          return
+        }
+      }
+
+      await handleStaffPostAuth()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Something went wrong.")
       setLoading(false)
     }
   }
@@ -61,15 +169,53 @@ export default function LoginPageClient() {
     <main className="min-h-screen bg-zinc-950 text-white">
       <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-          <h1 className="text-3xl font-semibold">UnitFlow Login</h1>
+          <h1 className="text-3xl font-semibold">UnitFlow Access</h1>
           <p className="mt-2 text-zinc-400">
-            Sign in to manage properties, units, tenants, and transfers.
+            Sign in or create an account for staff or resident access.
           </p>
+
+          <div className="mt-6">
+            <label className="mb-2 block text-sm text-zinc-400">Account Type</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAccountType("staff")
+                  setMessage("")
+                }}
+                className={`rounded px-4 py-3 text-sm ${
+                  accountType === "staff"
+                    ? "bg-white text-black"
+                    : "bg-black/40 text-zinc-300"
+                }`}
+              >
+                Staff
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setAccountType("resident")
+                  setMessage("")
+                }}
+                className={`rounded px-4 py-3 text-sm ${
+                  accountType === "resident"
+                    ? "bg-white text-black"
+                    : "bg-black/40 text-zinc-300"
+                }`}
+              >
+                Resident
+              </button>
+            </div>
+          </div>
 
           <div className="mt-4 flex gap-2">
             <button
               type="button"
-              onClick={() => setMode("login")}
+              onClick={() => {
+                setMode("login")
+                setMessage("")
+              }}
               className={`rounded px-4 py-2 text-sm ${
                 mode === "login"
                   ? "bg-white text-black"
@@ -81,14 +227,17 @@ export default function LoginPageClient() {
 
             <button
               type="button"
-              onClick={() => setMode("signup")}
+              onClick={() => {
+                setMode("signup")
+                setMessage("")
+              }}
               className={`rounded px-4 py-2 text-sm ${
                 mode === "signup"
                   ? "bg-white text-black"
                   : "bg-black/40 text-zinc-300"
               }`}
             >
-              Sign Up
+              Create Account
             </button>
           </div>
 
@@ -123,8 +272,8 @@ export default function LoginPageClient() {
               {loading
                 ? "Working..."
                 : mode === "login"
-                ? "Login"
-                : "Create Account"}
+                  ? `Login as ${accountType === "staff" ? "Staff" : "Resident"}`
+                  : `Create ${accountType === "staff" ? "Staff" : "Resident"} Account`}
             </button>
           </form>
 

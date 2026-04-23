@@ -49,6 +49,13 @@ type Props = {
   units: UnitRow[]
 }
 
+type ToastType = "success" | "error"
+
+type ToastState = {
+  message: string
+  type: ToastType
+} | null
+
 function getTransferStatusClasses(status: string) {
   switch (status.toLowerCase()) {
     case "requested":
@@ -78,6 +85,13 @@ export default function TransfersPageClient({
   const [selectedToPropertyId, setSelectedToPropertyId] = useState("")
   const [selectedToUnitId, setSelectedToUnitId] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
+  const [requestedDate, setRequestedDate] = useState("")
+  const [moveOutDate, setMoveOutDate] = useState("")
+  const [moveInDate, setMoveInDate] = useState("")
+  const [notes, setNotes] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState("")
+  const [toast, setToast] = useState<ToastState>(null)
 
   useEffect(() => {
     const storedSelectedPropertyId = getStoredSelectedPropertyId()
@@ -100,6 +114,25 @@ export default function TransfersPageClient({
       setStoredSelectedPropertyId(ALL_PROPERTIES_VALUE)
     }
   }, [properties])
+
+  useEffect(() => {
+    if (!toast) return
+
+    const timeout = window.setTimeout(() => {
+      setToast(null)
+    }, 2500)
+
+    return () => window.clearTimeout(timeout)
+  }, [toast])
+
+  function clearMessages() {
+    setErrorMessage("")
+    setToast(null)
+  }
+
+  function showToast(message: string, type: ToastType) {
+    setToast({ message, type })
+  }
 
   function handleSelectedPropertyChange(nextPropertyId: string) {
     setSelectedPropertyId(nextPropertyId)
@@ -128,9 +161,8 @@ export default function TransfersPageClient({
   }, [transfers, selectedPropertyId])
 
   const destinationPropertyOptions = useMemo(() => {
-    if (selectedPropertyId === ALL_PROPERTIES_VALUE) return properties
     return properties
-  }, [properties, selectedPropertyId])
+  }, [properties])
 
   const selectedTenant =
     scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
@@ -171,8 +203,94 @@ export default function TransfersPageClient({
     (transfer) => transfer.status.toLowerCase() === "completed"
   ).length
 
+  async function handleCreateTransfer(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    clearMessages()
+
+    if (!selectedTenantId) {
+      setErrorMessage("Tenant is required.")
+      return
+    }
+
+    if (!selectedToPropertyId) {
+      setErrorMessage("Destination property is required.")
+      return
+    }
+
+    if (!selectedToUnitId) {
+      setErrorMessage("Destination unit is required.")
+      return
+    }
+
+    if (!selectedTenant) {
+      setErrorMessage("Selected tenant not found.")
+      return
+    }
+
+    if (selectedTenant.unit_id === selectedToUnitId) {
+      setErrorMessage("Cannot transfer to the same unit.")
+      return
+    }
+
+    setSubmitting(true)
+
+    try {
+      const response = await fetch("/api/transfers", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          tenant_id: selectedTenantId,
+          to_property_id: selectedToPropertyId,
+          to_unit_id: selectedToUnitId,
+          requested_date: requestedDate || null,
+          move_out_date: moveOutDate || null,
+          move_in_date: moveInDate || null,
+          notes: notes.trim() || null,
+        }),
+      })
+
+      const result = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        setErrorMessage(result?.error || "Failed to create transfer.")
+        setSubmitting(false)
+        return
+      }
+
+      setSelectedTenantId("")
+      setSelectedToUnitId("")
+      setRequestedDate("")
+      setMoveOutDate("")
+      setMoveInDate("")
+      setNotes("")
+      setSubmitting(false)
+      showToast("Transfer created.", "success")
+
+      window.location.reload()
+    } catch {
+      setErrorMessage("Failed to create transfer.")
+      setSubmitting(false)
+    }
+  }
+
   return (
     <div>
+      {toast ? (
+        <div className="fixed right-4 top-4 z-50">
+          <div
+            className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${
+              toast.type === "success"
+                ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-200"
+                : "border-red-500/30 bg-red-500/15 text-red-200"
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-semibold">Transfers</h1>
@@ -209,13 +327,16 @@ export default function TransfersPageClient({
         </p>
       </div>
 
+      {errorMessage ? (
+        <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">
+          {errorMessage}
+        </div>
+      ) : null}
+
       <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-6">
         <h2 className="mb-4 text-xl font-semibold">Create Transfer</h2>
 
-        <form action="/api/transfers" method="POST" className="space-y-4">
-          <input type="hidden" name="from_property_id" value={fromPropertyId} />
-          <input type="hidden" name="from_unit_id" value={fromUnitId} />
-
+        <form onSubmit={handleCreateTransfer} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Property Context</label>
             <select
@@ -235,7 +356,6 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Tenant</label>
             <select
-              name="tenant_id"
               className="w-full rounded bg-black p-2"
               required
               value={selectedTenantId}
@@ -260,7 +380,6 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Destination Property</label>
             <select
-              name="to_property_id"
               className="w-full rounded bg-black p-2"
               required
               value={selectedToPropertyId}
@@ -281,7 +400,6 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Destination Unit</label>
             <select
-              name="to_unit_id"
               className="w-full rounded bg-black p-2"
               required
               value={selectedToUnitId}
@@ -292,8 +410,8 @@ export default function TransfersPageClient({
                 {!selectedToPropertyId
                   ? "Select Destination Property First"
                   : destinationUnits.length === 0
-                  ? "No available units"
-                  : "Select Destination Unit"}
+                    ? "No available units"
+                    : "Select Destination Unit"}
               </option>
               {destinationUnits.map((unit) => (
                 <option key={unit.id} value={unit.id}>
@@ -306,7 +424,8 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Requested Date</label>
             <input
-              name="requested_date"
+              value={requestedDate}
+              onChange={(e) => setRequestedDate(e.target.value)}
               placeholder="YYYY-MM-DD"
               className="w-full rounded bg-black p-2"
             />
@@ -315,7 +434,8 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Move Out Date</label>
             <input
-              name="move_out_date"
+              value={moveOutDate}
+              onChange={(e) => setMoveOutDate(e.target.value)}
               placeholder="YYYY-MM-DD"
               className="w-full rounded bg-black p-2"
             />
@@ -324,7 +444,8 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Move In Date</label>
             <input
-              name="move_in_date"
+              value={moveInDate}
+              onChange={(e) => setMoveInDate(e.target.value)}
               placeholder="YYYY-MM-DD"
               className="w-full rounded bg-black p-2"
             />
@@ -333,15 +454,20 @@ export default function TransfersPageClient({
           <div>
             <label className="mb-1 block text-sm text-zinc-400">Notes</label>
             <textarea
-              name="notes"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
               placeholder="Notes"
               className="w-full rounded bg-black p-2"
               rows={3}
             />
           </div>
 
-          <button className="w-full rounded bg-blue-600 p-2 hover:bg-blue-700">
-            Create Transfer
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full rounded bg-blue-600 p-2 text-white hover:bg-blue-700 disabled:opacity-60"
+          >
+            {submitting ? "Creating Transfer..." : "Create Transfer"}
           </button>
         </form>
       </div>
@@ -405,8 +531,8 @@ export default function TransfersPageClient({
                       {transfer.move_out_date && transfer.move_in_date
                         ? `${transfer.move_out_date} → ${transfer.move_in_date}`
                         : transfer.move_out_date
-                        ? `Move out: ${transfer.move_out_date}`
-                        : `Move in: ${transfer.move_in_date}`}
+                          ? `Move out: ${transfer.move_out_date}`
+                          : `Move in: ${transfer.move_in_date}`}
                     </p>
                   ) : null}
 

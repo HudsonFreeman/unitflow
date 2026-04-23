@@ -41,6 +41,35 @@ type EditingUnitState = {
   status: string
 } | null
 
+async function getCurrentOrganizationId() {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabaseClient.auth.getUser()
+
+  if (userError || !user) {
+    throw new Error("Unauthorized")
+  }
+
+  const { data, error } = await supabaseClient
+    .from("organization_members")
+    .select("organization_id")
+    .eq("user_id", user.id)
+    .limit(1)
+
+  if (error) {
+    throw new Error(error.message)
+  }
+
+  const orgId = data?.[0]?.organization_id
+
+  if (!orgId) {
+    throw new Error("No organization found")
+  }
+
+  return orgId
+}
+
 function formatUnitStatus(status?: string | null) {
   if (!status) return "unknown"
   return status.replaceAll("_", " ")
@@ -426,9 +455,24 @@ export default function PropertiesPage() {
 
     setSubmittingProperty(true)
 
+    let orgId: string
+
+    try {
+      orgId = await getCurrentOrganizationId()
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to get organization")
+      setSubmittingProperty(false)
+      return
+    }
+
     const { data, error } = await supabaseClient
       .from("properties")
-      .insert([{ name: trimmedName }])
+      .insert([
+        {
+          name: trimmedName,
+          organization_id: orgId,
+        },
+      ])
       .select("id, name, created_by")
 
     if (error) {
@@ -585,6 +629,16 @@ export default function PropertiesPage() {
 
     setSubmittingUnit(true)
 
+    let orgId: string
+
+    try {
+      orgId = await getCurrentOrganizationId()
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to get organization")
+      setSubmittingUnit(false)
+      return
+    }
+
     const { data, error } = await supabaseClient
       .from("units")
       .insert([
@@ -592,6 +646,7 @@ export default function PropertiesPage() {
           property_id: selectedPropertyId,
           unit_number: trimmedUnitNumber,
           status: unitStatus,
+          organization_id: orgId,
         },
       ])
       .select("id, unit_number, property_id, status, created_by")
@@ -783,9 +838,19 @@ export default function PropertiesPage() {
       property_id: string
       unit_number: string
       status: string
+      organization_id: string
     }> = []
 
     const duplicateNumbers: string[] = []
+
+    let orgId: string
+
+    try {
+      orgId = await getCurrentOrganizationId()
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to get organization")
+      return
+    }
 
     for (let i = startNumber; i <= endNumber; i += 1) {
       const generatedUnitNumber = padUnitNumber(i, padWidth)
@@ -800,6 +865,7 @@ export default function PropertiesPage() {
         property_id: selectedPropertyId,
         unit_number: generatedUnitNumber,
         status: bulkStatus,
+        organization_id: orgId,
       })
     }
 
@@ -895,10 +961,21 @@ export default function PropertiesPage() {
 
       const seenInFile = new Set<string>()
       const duplicates: string[] = []
+      let orgId: string
+
+      try {
+        orgId = await getCurrentOrganizationId()
+      } catch (err) {
+        setErrorMessage(err instanceof Error ? err.message : "Failed to get organization")
+        setSubmittingCsvUnits(false)
+        return
+      }
+
       const payload: Array<{
         property_id: string
         unit_number: string
         status: string
+        organization_id: string
       }> = []
 
       for (const row of parsed.rows) {
@@ -917,6 +994,7 @@ export default function PropertiesPage() {
           property_id: selectedPropertyId,
           unit_number: row.unit_number.trim(),
           status: normalizeUnitStatus(row.status),
+          organization_id: orgId,
         })
       }
 

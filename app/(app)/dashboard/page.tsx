@@ -2,7 +2,6 @@
 
 import Link from "next/link"
 import { useEffect, useMemo, useState } from "react"
-import { useRouter } from "next/navigation"
 import { supabaseClient } from "@/lib/supabase-client"
 import {
   ALL_PROPERTIES_VALUE,
@@ -13,25 +12,24 @@ import {
 type PropertyRow = {
   id: string
   name: string
-  created_by: string
 }
 
 type UnitRow = {
   id: string
-  unit_number: string
   property_id: string
-  status: string | null
-  created_by: string
+  unit_number: string
+  status?: string | null
 }
 
 type TenantRow = {
   id: string
   first_name: string
   last_name: string
-  status: string
   property_id: string
   unit_id: string
-  created_by: string
+  status?: string | null
+  lease_start?: string | null
+  lease_end?: string | null
 }
 
 type TransferRow = {
@@ -42,345 +40,232 @@ type TransferRow = {
   move_out_date: string | null
   move_in_date: string | null
   notes: string | null
+  denial_reason?: string | null
   tenant_id: string
   from_property_id: string
   from_unit_id: string
   to_property_id: string
   to_unit_id: string
-  created_at: string
-  created_by: string
 }
 
-type RecommendedAction = {
+type ActionItem = {
   id: string
+  priorityNumber: number
+  level: "high" | "pending" | "risk"
   title: string
-  description: string
-  reason: string
+  subtitle: string
+  detail: string
   href: string
-  cta: string
-  tone: "red" | "amber" | "blue" | "emerald"
+  accent: string
 }
 
-function getTransferStatusClasses(status: string) {
-  switch (status.toLowerCase()) {
-    case "requested":
-      return "border-amber-500/20 bg-amber-500/10 text-amber-300"
-    case "approved":
-      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-    case "scheduled":
-      return "border-blue-500/20 bg-blue-500/10 text-blue-300"
-    case "completed":
-      return "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
-    case "cancelled":
-      return "border-red-500/20 bg-red-500/10 text-red-300"
-    default:
-      return "border-white/10 bg-white/5 text-zinc-300"
-  }
+type ActivityItem = {
+  id: string
+  label: string
+  detail: string
+  time: string
+  tone: "violet" | "emerald" | "red" | "zinc"
 }
 
-function getUnitStatusClasses(status?: string | null) {
-  switch ((status ?? "").toLowerCase()) {
-    case "occupied":
-      return "text-emerald-300"
-    case "vacant":
-      return "text-zinc-300"
-    case "make_ready":
-      return "text-orange-300"
-    case "notice":
-      return "text-amber-300"
-    default:
-      return "text-zinc-400"
-  }
+function formatDateValue(value?: string | null) {
+  if (!value) return "—"
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+
+  return date.toLocaleDateString()
 }
 
-function getActionToneClasses(tone: RecommendedAction["tone"]) {
-  switch (tone) {
-    case "red":
-      return "border-red-500/20 bg-red-500/10 text-red-300"
-    case "amber":
-      return "border-amber-500/20 bg-amber-500/10 text-amber-300"
-    case "blue":
-      return "border-blue-500/20 bg-blue-500/10 text-blue-300"
-    case "emerald":
-      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-    default:
-      return "border-white/10 bg-white/5 text-zinc-300"
-  }
+function getDaysUntil(dateValue?: string | null) {
+  if (!dateValue) return null
+
+  const today = new Date()
+  const target = new Date(dateValue)
+
+  if (Number.isNaN(target.getTime())) return null
+
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const targetStart = new Date(target.getFullYear(), target.getMonth(), target.getDate())
+
+  const diffMs = targetStart.getTime() - todayStart.getTime()
+  return Math.round(diffMs / (1000 * 60 * 60 * 24))
 }
 
-function formatTransferWindow(moveOutDate?: string | null, moveInDate?: string | null) {
-  if (moveOutDate && moveInDate) {
-    return `${moveOutDate} → ${moveInDate}`
+function getTransferStage(transfer: TransferRow) {
+  const status = (transfer.status ?? "").toLowerCase()
+
+  if (status === "completed") return "completed"
+  if (status === "cancelled") return "cancelled"
+  if (status === "approved") {
+    if (transfer.move_out_date || transfer.move_in_date) return "scheduled"
+    return "approved"
   }
 
-  if (moveOutDate) {
-    return `Move out: ${moveOutDate}`
-  }
-
-  if (moveInDate) {
-    return `Move in: ${moveInDate}`
-  }
-
-  return "Dates not scheduled"
+  return "requested"
 }
 
-function clampScore(value: number) {
-  return Math.max(0, Math.min(100, Math.round(value)))
+function formatRelativeUrgency(days: number | null) {
+  if (days === null) return "No date"
+  if (days < 0) return `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue`
+  if (days === 0) return "Today"
+  if (days === 1) return "1 day"
+  return `${days} days`
 }
 
-function getScoreToneClasses(score: number) {
-  if (score >= 80) return "text-emerald-300"
-  if (score >= 60) return "text-blue-300"
-  if (score >= 40) return "text-amber-300"
-  return "text-red-300"
-}
-
-function getBarToneClasses(score: number) {
-  if (score >= 80) return "bg-emerald-500/80"
-  if (score >= 60) return "bg-blue-500/80"
-  if (score >= 40) return "bg-amber-500/80"
-  return "bg-red-500/80"
-}
-
-function getMetricToneClasses(value: number, reverse = false) {
-  if (reverse) {
-    if (value <= 10) return "text-emerald-300"
-    if (value <= 25) return "text-blue-300"
-    if (value <= 40) return "text-amber-300"
-    return "text-red-300"
-  }
-
-  if (value >= 80) return "text-emerald-300"
-  if (value >= 60) return "text-blue-300"
-  if (value >= 40) return "text-amber-300"
-  return "text-red-300"
-}
-
-async function fetchAllProperties(): Promise<PropertyRow[]> {
-  const pageSize = 1000
-  let from = 0
-  let keepGoing = true
-  const allRows: PropertyRow[] = []
-
-  while (keepGoing) {
-    const { data, error } = await supabaseClient
-      .from("properties")
-      .select("id, name, created_by")
-      .order("id")
-      .range(from, from + pageSize - 1)
-
-    if (error) {
-      throw new Error(error.message)
-    }
-
-    const rows = (data ?? []) as PropertyRow[]
-    allRows.push(...rows)
-
-    if (rows.length < pageSize) {
-      keepGoing = false
-    } else {
-      from += pageSize
+function getToneClasses(level: ActionItem["level"]) {
+  if (level === "high") {
+    return {
+      number: "text-violet-400",
+      label: "text-violet-300",
+      dot: "bg-violet-500",
+      button: "border-violet-500/30 text-violet-300 hover:bg-violet-500/10",
     }
   }
 
-  return allRows
-}
-
-async function fetchAllUnits(): Promise<UnitRow[]> {
-  const pageSize = 1000
-  let from = 0
-  let keepGoing = true
-  const allRows: UnitRow[] = []
-
-  while (keepGoing) {
-    const { data, error } = await supabaseClient
-      .from("units")
-      .select("id, unit_number, property_id, status, created_by")
-      .order("id")
-      .range(from, from + pageSize - 1)
-
-    if (error) {
-      throw new Error(error.message)
-    }
-
-    const rows = (data ?? []) as UnitRow[]
-    allRows.push(...rows)
-
-    if (rows.length < pageSize) {
-      keepGoing = false
-    } else {
-      from += pageSize
+  if (level === "pending") {
+    return {
+      number: "text-violet-400",
+      label: "text-violet-300",
+      dot: "bg-violet-500",
+      button: "border-violet-500/30 text-violet-300 hover:bg-violet-500/10",
     }
   }
 
-  return allRows
+  return {
+    number: "text-red-400",
+    label: "text-red-300",
+    dot: "bg-red-500",
+    button: "border-red-500/30 text-red-300 hover:bg-red-500/10",
+  }
 }
 
-async function fetchAllTenants(): Promise<TenantRow[]> {
-  const pageSize = 1000
-  let from = 0
-  let keepGoing = true
-  const allRows: TenantRow[] = []
-
-  while (keepGoing) {
-    const { data, error } = await supabaseClient
-      .from("tenants")
-      .select("id, first_name, last_name, status, property_id, unit_id, created_by")
-      .order("id")
-      .range(from, from + pageSize - 1)
-
-    if (error) {
-      throw new Error(error.message)
-    }
-
-    const rows = (data ?? []) as TenantRow[]
-    allRows.push(...rows)
-
-    if (rows.length < pageSize) {
-      keepGoing = false
-    } else {
-      from += pageSize
-    }
-  }
-
-  return allRows
+function getActivityToneClasses(tone: ActivityItem["tone"]) {
+  if (tone === "emerald") return "bg-emerald-500/15 text-emerald-300"
+  if (tone === "red") return "bg-red-500/15 text-red-300"
+  if (tone === "violet") return "bg-violet-500/15 text-violet-300"
+  return "bg-white/8 text-zinc-300"
 }
 
-async function fetchAllTransfers(): Promise<TransferRow[]> {
-  const pageSize = 1000
-  let from = 0
-  let keepGoing = true
-  const allRows: TransferRow[] = []
+function getSafeTimeLabel(value?: string | null) {
+  if (!value) return "Recently"
 
-  while (keepGoing) {
-    const { data, error } = await supabaseClient
-      .from("transfers")
-      .select(
-        "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id, created_at, created_by"
-      )
-      .order("id")
-      .range(from, from + pageSize - 1)
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "Recently"
 
-    if (error) {
-      throw new Error(error.message)
-    }
-
-    const rows = (data ?? []) as TransferRow[]
-    allRows.push(...rows)
-
-    if (rows.length < pageSize) {
-      keepGoing = false
-    } else {
-      from += pageSize
-    }
-  }
-
-  return allRows
+  return date.toLocaleDateString()
 }
 
 export default function DashboardPage() {
-  const router = useRouter()
-
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState("")
+  const [selectedPropertyId, setSelectedPropertyId] = useState(ALL_PROPERTIES_VALUE)
+
   const [properties, setProperties] = useState<PropertyRow[]>([])
   const [units, setUnits] = useState<UnitRow[]>([])
   const [tenants, setTenants] = useState<TenantRow[]>([])
   const [transfers, setTransfers] = useState<TransferRow[]>([])
-  const [selectedPropertyId, setSelectedPropertyId] = useState(ALL_PROPERTIES_VALUE)
 
-  useEffect(() => {
-    async function loadDashboard() {
-      setLoading(true)
-      setErrorMessage("")
+  async function loadDashboard() {
+    setLoading(true)
+    setErrorMessage("")
 
+    try {
       const {
-        data: { user },
-        error: userError,
-      } = await supabaseClient.auth.getUser()
+        data: { session },
+      } = await supabaseClient.auth.getSession()
 
-      if (userError || !user) {
+      if (!session) {
         setErrorMessage("You must be logged in to view the dashboard.")
         setLoading(false)
         return
       }
 
-      const { data: profile, error: profileError } = await supabaseClient
-        .from("profiles")
-        .select("user_id")
-        .eq("user_id", user.id)
-        .maybeSingle()
+      const [
+        { data: propertiesData, error: propertiesError },
+        { data: unitsData, error: unitsError },
+        { data: tenantsData, error: tenantsError },
+        { data: transfersData, error: transfersError },
+      ] = await Promise.all([
+        supabaseClient.from("properties").select("id, name").order("name"),
+        supabaseClient
+          .from("units")
+          .select("id, property_id, unit_number, status")
+          .order("unit_number"),
+        supabaseClient
+          .from("tenants")
+          .select("id, first_name, last_name, property_id, unit_id, status, lease_start, lease_end")
+          .order("created_at", { ascending: false }),
+        supabaseClient
+          .from("transfers")
+          .select(
+            "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
+          )
+          .order("created_at", { ascending: false }),
+      ])
 
-      if (profileError) {
-        setErrorMessage(profileError.message)
-        setLoading(false)
-        return
-      }
-
-      if (!profile) {
-        router.replace("/create-profile")
-        return
-      }
-
-      try {
-        const [nextProperties, nextUnits, nextTenants, nextTransfers] = await Promise.all([
-          fetchAllProperties(),
-          fetchAllUnits(),
-          fetchAllTenants(),
-          fetchAllTransfers(),
-        ])
-
-        setProperties(nextProperties)
-        setUnits(nextUnits)
-        setTenants(nextTenants)
-        setTransfers(nextTransfers)
-
-        const storedSelectedPropertyId = getStoredSelectedPropertyId()
-
-        if (
-          storedSelectedPropertyId === ALL_PROPERTIES_VALUE ||
-          nextProperties.some((property) => property.id === storedSelectedPropertyId)
-        ) {
-          setSelectedPropertyId(storedSelectedPropertyId)
-        } else {
-          setSelectedPropertyId(ALL_PROPERTIES_VALUE)
-          setStoredSelectedPropertyId(ALL_PROPERTIES_VALUE)
-        }
-
-        setLoading(false)
-      } catch (error) {
+      if (propertiesError || unitsError || tenantsError || transfersError) {
         setErrorMessage(
-          error instanceof Error ? error.message : "Failed to load dashboard data."
+          propertiesError?.message ||
+            unitsError?.message ||
+            tenantsError?.message ||
+            transfersError?.message ||
+            "Failed to load dashboard data."
         )
         setLoading(false)
+        return
       }
-    }
 
+      const nextProperties = (propertiesData ?? []) as PropertyRow[]
+      setProperties(nextProperties)
+      setUnits((unitsData ?? []) as UnitRow[])
+      setTenants((tenantsData ?? []) as TenantRow[])
+      setTransfers((transfersData ?? []) as TransferRow[])
+
+      const storedSelectedPropertyId = getStoredSelectedPropertyId()
+
+      if (
+        storedSelectedPropertyId === ALL_PROPERTIES_VALUE ||
+        nextProperties.some((property) => property.id === storedSelectedPropertyId)
+      ) {
+        setSelectedPropertyId(storedSelectedPropertyId)
+      } else if (nextProperties.length > 0) {
+        setSelectedPropertyId(nextProperties[0].id)
+        setStoredSelectedPropertyId(nextProperties[0].id)
+      } else {
+        setSelectedPropertyId(ALL_PROPERTIES_VALUE)
+        setStoredSelectedPropertyId(ALL_PROPERTIES_VALUE)
+      }
+
+      setLoading(false)
+    } catch {
+      setErrorMessage("Failed to load dashboard data.")
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
     loadDashboard()
-  }, [router])
+  }, [])
 
   useEffect(() => {
     function handlePropertyChange(e: Event) {
       const customEvent = e as CustomEvent<{ propertyId: string }>
-      const newPropertyId = customEvent.detail?.propertyId ?? ALL_PROPERTIES_VALUE
-      setSelectedPropertyId(newPropertyId)
+      const nextPropertyId = customEvent.detail?.propertyId ?? ALL_PROPERTIES_VALUE
+      setSelectedPropertyId(nextPropertyId)
     }
 
     window.addEventListener("propertyChanged", handlePropertyChange)
-
-    return () => {
-      window.removeEventListener("propertyChanged", handlePropertyChange)
-    }
+    return () => window.removeEventListener("propertyChanged", handlePropertyChange)
   }, [])
-
-  function handleSelectedPropertyChange(nextPropertyId: string) {
-    setSelectedPropertyId(nextPropertyId)
-    setStoredSelectedPropertyId(nextPropertyId)
-  }
 
   const propertyMap = useMemo(
     () => new Map(properties.map((property) => [property.id, property])),
     [properties]
+  )
+
+  const unitMap = useMemo(
+    () => new Map(units.map((unit) => [unit.id, unit])),
+    [units]
   )
 
   const tenantMap = useMemo(
@@ -392,6 +277,8 @@ export default function DashboardPage() {
     selectedPropertyId === ALL_PROPERTIES_VALUE
       ? null
       : properties.find((property) => property.id === selectedPropertyId) ?? null
+
+  const selectedPropertyName = selectedProperty?.name ?? "All Properties"
 
   const scopedUnits = useMemo(() => {
     if (selectedPropertyId === ALL_PROPERTIES_VALUE) return units
@@ -405,7 +292,6 @@ export default function DashboardPage() {
 
   const scopedTransfers = useMemo(() => {
     if (selectedPropertyId === ALL_PROPERTIES_VALUE) return transfers
-
     return transfers.filter(
       (transfer) =>
         transfer.from_property_id === selectedPropertyId ||
@@ -413,781 +299,534 @@ export default function DashboardPage() {
     )
   }, [transfers, selectedPropertyId])
 
-  const totalUnits = scopedUnits.length
-  const occupiedUnits = scopedUnits.filter(
-    (unit) => (unit.status ?? "").toLowerCase() === "occupied"
-  ).length
-  const vacantUnits = scopedUnits.filter(
-    (unit) => (unit.status ?? "").toLowerCase() === "vacant"
-  ).length
-  const makeReadyUnits = scopedUnits.filter(
-    (unit) => (unit.status ?? "").toLowerCase() === "make_ready"
-  ).length
-  const noticeUnits = scopedUnits.filter(
-    (unit) => (unit.status ?? "").toLowerCase() === "notice"
-  ).length
+  const noticeTenants = useMemo(() => {
+    return scopedTenants
+      .filter((tenant) => (tenant.status ?? "").toLowerCase() === "notice")
+      .sort((a, b) => {
+        const aDays = getDaysUntil(a.lease_end)
+        const bDays = getDaysUntil(b.lease_end)
 
-  const occupancyRate = totalUnits > 0 ? Math.round((occupiedUnits / totalUnits) * 100) : 0
+        if (aDays === null && bDays === null) return 0
+        if (aDays === null) return 1
+        if (bDays === null) return -1
+        return aDays - bDays
+      })
+  }, [scopedTenants])
 
-  const requestedTransfers = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "requested"
-  ).length
-  const approvedTransfers = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "approved"
-  ).length
-  const completedTransfers = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "completed"
-  ).length
-  const scheduledTransfers = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "scheduled"
-  ).length
+  const urgentNoticeTenants = noticeTenants.filter((tenant) => {
+    const days = getDaysUntil(tenant.lease_end)
+    return days !== null && days <= 7
+  })
 
-  const openTransfers = requestedTransfers + approvedTransfers + scheduledTransfers
+  const openTransfers = scopedTransfers.filter((transfer) =>
+    ["requested", "approved", "scheduled"].includes(getTransferStage(transfer))
+  )
 
-  const activeTenants = scopedTenants.filter(
-    (tenant) => tenant.status.toLowerCase() === "active"
-  ).length
-  const noticeTenants = scopedTenants.filter(
-    (tenant) => tenant.status.toLowerCase() === "notice"
-  ).length
-  const movedOutTenants = scopedTenants.filter(
-    (tenant) => tenant.status.toLowerCase() === "moved_out"
-  ).length
+  const requestedTransfers = openTransfers.filter(
+    (transfer) => getTransferStage(transfer) === "requested"
+  )
 
-  const recentTransfers = scopedTransfers.slice(0, 5)
+  const approvedTransfers = openTransfers.filter(
+    (transfer) => getTransferStage(transfer) === "approved"
+  )
 
-  const propertySummaries = useMemo(() => {
-    const propertiesToShow =
-      selectedPropertyId === ALL_PROPERTIES_VALUE
-        ? properties
-        : properties.filter((property) => property.id === selectedPropertyId)
+  const scheduledTransfers = openTransfers.filter(
+    (transfer) => getTransferStage(transfer) === "scheduled"
+  )
 
-    return propertiesToShow.map((property) => {
-      const propertyUnits = units.filter((unit) => unit.property_id === property.id)
-      const propertyTenants = tenants.filter((tenant) => tenant.property_id === property.id)
-      const propertyOccupiedUnits = propertyUnits.filter(
-        (unit) => (unit.status ?? "").toLowerCase() === "occupied"
-      ).length
+  const completedThisScope = scopedTransfers.filter(
+    (transfer) => getTransferStage(transfer) === "completed"
+  )
 
-      const propertyOccupancy =
-        propertyUnits.length > 0
-          ? Math.round((propertyOccupiedUnits / propertyUnits.length) * 100)
-          : 0
+  const riskyTransfers = openTransfers.filter((transfer) => {
+    if (!transfer.move_in_date) return true
 
-      return {
-        property,
-        totalUnits: propertyUnits.length,
-        occupiedUnits: propertyOccupiedUnits,
-        tenants: propertyTenants.length,
-        occupancy: propertyOccupancy,
+    const destinationUnit = unitMap.get(transfer.to_unit_id)
+    if (!destinationUnit) return true
+
+    const destinationStatus = (destinationUnit.status ?? "").toLowerCase()
+    if (!["vacant", "make_ready", "notice"].includes(destinationStatus)) return true
+
+    if (destinationStatus === "notice") {
+      const destinationOccupant = scopedTenants.find(
+        (tenant) =>
+          tenant.unit_id === destinationUnit.id &&
+          !["moved_out", "transferred"].includes((tenant.status ?? "").toLowerCase())
+      )
+
+      if (!destinationOccupant?.lease_end) return true
+
+      const destinationAvailableDays = getDaysUntil(destinationOccupant.lease_end)
+      const requestedMoveDate = new Date(transfer.move_in_date)
+      const destinationAvailableDate = new Date(destinationOccupant.lease_end)
+
+      if (
+        destinationAvailableDays === null ||
+        Number.isNaN(requestedMoveDate.getTime()) ||
+        Number.isNaN(destinationAvailableDate.getTime())
+      ) {
+        return true
       }
-    })
-  }, [properties, units, tenants, selectedPropertyId])
 
-  const setupChecklist = [
-    {
-      label: selectedProperty ? "Property selected" : "Create your first property",
-      done:
-        selectedPropertyId === ALL_PROPERTIES_VALUE
-          ? properties.length > 0
-          : Boolean(selectedProperty),
-      href: "/properties",
-    },
-    {
-      label: "Add your first unit",
-      done: scopedUnits.length > 0,
-      href: "/properties",
-    },
-    {
-      label: "Add your first tenant",
-      done: scopedTenants.length > 0,
-      href: "/tenants",
-    },
-    {
-      label: "Create your first transfer",
-      done: scopedTransfers.length > 0,
-      href: "/transfers",
-    },
-  ]
+      return destinationAvailableDate.getTime() > requestedMoveDate.getTime()
+    }
 
-  const operationalHealthScore = useMemo(() => {
-    if (totalUnits === 0) return 0
+    return false
+  })
 
-    const vacancyPenalty = vacantUnits * 9
-    const noticePenalty = noticeUnits * 6
-    const transferPenalty = Math.max(0, openTransfers - completedTransfers) * 2
+  const occupancy = scopedUnits.length
+    ? Math.round(
+        (scopedUnits.filter((unit) => (unit.status ?? "").toLowerCase() === "occupied").length /
+          scopedUnits.length) *
+          100
+      )
+    : 0
 
-    return clampScore(occupancyRate - vacancyPenalty - noticePenalty - transferPenalty)
-  }, [totalUnits, vacantUnits, noticeUnits, openTransfers, completedTransfers, occupancyRate])
+  const actionItems: ActionItem[] = useMemo(() => {
+    const items: ActionItem[] = []
 
-  const vacancyRiskScore = useMemo(() => {
-    if (totalUnits === 0) return 0
-
-    const exposureUnits = vacantUnits + noticeUnits + makeReadyUnits * 0.5
-    return clampScore((exposureUnits / totalUnits) * 100)
-  }, [totalUnits, vacantUnits, noticeUnits, makeReadyUnits])
-
-  const transferReadinessScore = useMemo(() => {
-    if (totalUnits === 0) return 0
-
-    const readyUnits = vacantUnits + makeReadyUnits + noticeUnits
-    const readinessBase = (readyUnits / totalUnits) * 100
-    const openTransferBonus = Math.min(openTransfers * 6, 20)
-
-    return clampScore(readinessBase + openTransferBonus)
-  }, [totalUnits, vacantUnits, makeReadyUnits, noticeUnits, openTransfers])
-
-  const transferCompletionRate = useMemo(() => {
-    const totalTransferActivity =
-      requestedTransfers + approvedTransfers + scheduledTransfers + completedTransfers
-    if (totalTransferActivity === 0) return 0
-
-    return Math.round((completedTransfers / totalTransferActivity) * 100)
-  }, [requestedTransfers, approvedTransfers, scheduledTransfers, completedTransfers])
-
-  const makeReadyShare = useMemo(() => {
-    if (totalUnits === 0) return 0
-    return Math.round((makeReadyUnits / totalUnits) * 100)
-  }, [makeReadyUnits, totalUnits])
-
-  const noticePressure = useMemo(() => {
-    if (scopedTenants.length === 0) return 0
-    return Math.round((noticeTenants / scopedTenants.length) * 100)
-  }, [scopedTenants.length, noticeTenants])
-
-  const activeTransferPressure = useMemo(() => {
-    if (scopedTenants.length === 0) return 0
-    return Math.round((openTransfers / scopedTenants.length) * 100)
-  }, [scopedTenants.length, openTransfers])
-
-  const analyticsCards = [
-    {
-      title: "Operational Health",
-      value: `${operationalHealthScore}`,
-      suffix: "/100",
-      subtext:
-        operationalHealthScore >= 80
-          ? "Property is operating cleanly"
-          : operationalHealthScore >= 60
-          ? "Stable, but worth watching"
-          : operationalHealthScore >= 40
-          ? "Pressure is building"
-          : "Needs immediate attention",
-      valueClasses: getScoreToneClasses(operationalHealthScore),
-      barValue: operationalHealthScore,
-      barClasses: getBarToneClasses(operationalHealthScore),
-    },
-    {
-      title: "Vacancy Risk",
-      value: `${vacancyRiskScore}`,
-      suffix: "/100",
-      subtext:
-        vacancyRiskScore <= 10
-          ? "Low vacancy exposure"
-          : vacancyRiskScore <= 25
-          ? "Manageable risk"
-          : vacancyRiskScore <= 40
-          ? "Growing exposure"
-          : "High risk of lost revenue",
-      valueClasses: getMetricToneClasses(100 - vacancyRiskScore),
-      barValue: vacancyRiskScore,
-      barClasses: getBarToneClasses(100 - vacancyRiskScore),
-    },
-    {
-      title: "Transfer Readiness",
-      value: `${transferReadinessScore}`,
-      suffix: "/100",
-      subtext:
-        transferReadinessScore >= 80
-          ? "Strong move options available"
-          : transferReadinessScore >= 60
-          ? "Good operational flexibility"
-          : transferReadinessScore >= 40
-          ? "Limited move options"
-          : "Thin transfer inventory",
-      valueClasses: getScoreToneClasses(transferReadinessScore),
-      barValue: transferReadinessScore,
-      barClasses: getBarToneClasses(transferReadinessScore),
-    },
-  ]
-
-  const metricTiles = [
-    {
-      title: "Transfer Completion",
-      value: `${transferCompletionRate}%`,
-      tone: getMetricToneClasses(transferCompletionRate),
-      subtext: `${completedTransfers} completed out of total transfer activity`,
-    },
-    {
-      title: "Notice Pressure",
-      value: `${noticePressure}%`,
-      tone: getMetricToneClasses(100 - noticePressure),
-      subtext: `${noticeTenants} tenant${noticeTenants === 1 ? "" : "s"} on notice`,
-    },
-    {
-      title: "Make Ready Share",
-      value: `${makeReadyShare}%`,
-      tone: getMetricToneClasses(100 - makeReadyShare),
-      subtext: `${makeReadyUnits} unit${makeReadyUnits === 1 ? "" : "s"} currently make-ready`,
-    },
-    {
-      title: "Transfer Pressure",
-      value: `${activeTransferPressure}%`,
-      tone: getMetricToneClasses(100 - activeTransferPressure),
-      subtext: `${openTransfers} open transfer${openTransfers === 1 ? "" : "s"} in progress`,
-    },
-  ]
-
-  const recommendedActions = useMemo<RecommendedAction[]>(() => {
-    const actions: RecommendedAction[] = []
-
-    const noticeTenantsForActions = scopedTenants
-      .filter((tenant) => tenant.status.toLowerCase() === "notice")
-      .slice(0, 2)
-
-    for (const tenant of noticeTenantsForActions) {
-      const property = propertyMap.get(tenant.property_id)
-      actions.push({
-        id: `notice-${tenant.id}`,
-        title: `${tenant.first_name} ${tenant.last_name} is on notice`,
-        description: "Review this tenant now and decide whether to retain, transfer, or prepare for vacancy.",
-        reason: `${property?.name ?? "This property"} already has notice pressure.`,
+    if (urgentNoticeTenants.length > 0) {
+      items.push({
+        id: "urgent-notice",
+        priorityNumber: 1,
+        level: "high",
+        title: `${urgentNoticeTenants.length} tenant${urgentNoticeTenants.length === 1 ? "" : "s"} will leave soon`,
+        subtitle:
+          urgentNoticeTenants.length === 1
+            ? "Expiring within 7 days"
+            : "Expiring within 7 days",
+        detail: `Risk: ${urgentNoticeTenants.length} unit${urgentNoticeTenants.length === 1 ? "" : "s"} may become vacant.`,
         href: "/tenants",
-        cta: "Review tenant",
-        tone: "amber",
+        accent: "Review tenants",
       })
     }
 
-    if (vacantUnits > 0) {
-      actions.push({
-        id: "vacant-units",
-        title: `${vacantUnits} vacant unit${vacantUnits === 1 ? "" : "s"} need attention`,
-        description: "Vacant units generate no revenue. Review open units and decide where transfer opportunities exist.",
-        reason: "Empty inventory is the clearest current revenue leak.",
-        href: "/properties",
-        cta: "Review units",
-        tone: "red",
-      })
-    }
-
-    if (makeReadyUnits > 0) {
-      actions.push({
-        id: "make-ready-units",
-        title: `${makeReadyUnits} unit${makeReadyUnits === 1 ? "" : "s"} are in make-ready`,
-        description: "These units are close to being usable and should be watched closely for next placement.",
-        reason: "Make-ready units are near-term inventory you can activate.",
-        href: "/properties",
-        cta: "Open properties",
-        tone: "blue",
-      })
-    }
-
-    if (openTransfers > 0) {
-      actions.push({
-        id: "open-transfers",
-        title: `${openTransfers} transfer${openTransfers === 1 ? "" : "s"} are still open`,
-        description: "Pending transfer work should move forward quickly so requests do not stall in the system.",
-        reason: "Open transfers represent active operational decisions still in motion.",
+    if (requestedTransfers.length > 0) {
+      items.push({
+        id: "requested-transfers",
+        priorityNumber: items.length + 1,
+        level: "pending",
+        title: `${requestedTransfers.length} transfer${requestedTransfers.length === 1 ? "" : "s"} awaiting approval`,
+        subtitle: "Your decision is needed",
+        detail: "Approve, deny, or review timing before vacancy is created.",
         href: "/transfers",
-        cta: "Open transfers",
-        tone: "blue",
+        accent: "Review transfers",
       })
     }
 
-    if (vacantUnits > 0 && noticeTenants > 0) {
-      actions.push({
-        id: "retention-opportunity",
-        title: "You have a retention opportunity",
-        description: "There are both vacant units and notice tenants in the current scope. Review whether an internal move can prevent vacancy loss.",
-        reason: "This is where UnitFlow creates the most value.",
+    if (riskyTransfers.length > 0) {
+      items.push({
+        id: "risky-transfers",
+        priorityNumber: items.length + 1,
+        level: "risk",
+        title: `${riskyTransfers.length} transfer conflict${riskyTransfers.length === 1 ? "" : "s"}`,
+        subtitle: "Action required to avoid bad data or vacancy loss",
+        detail: "These transfers have timing or destination issues that need attention.",
         href: "/transfers",
-        cta: "Start transfer",
+        accent: "Fix issue",
+      })
+    }
+
+    if (items.length === 0) {
+      items.push({
+        id: "clear",
+        priorityNumber: 1,
+        level: "pending",
+        title: "No urgent decisions right now",
+        subtitle: "Your portfolio is clear",
+        detail: "No notice pressure, pending approvals, or transfer conflicts in this scope.",
+        href: "/transfers",
+        accent: "Open transfers",
+      })
+    }
+
+    return items.slice(0, 3)
+  }, [urgentNoticeTenants.length, requestedTransfers.length, riskyTransfers.length])
+
+  const upcomingExpirations = noticeTenants.slice(0, 3)
+
+  const recentActivity: ActivityItem[] = useMemo(() => {
+    const items: ActivityItem[] = []
+
+    for (const transfer of scopedTransfers.slice(0, 5)) {
+      const tenant = tenantMap.get(transfer.tenant_id)
+      const tenantName = tenant
+        ? `${tenant.first_name} ${tenant.last_name}`
+        : "Unknown tenant"
+
+      const stage = getTransferStage(transfer)
+
+      if (stage === "completed") {
+        const toUnit = unitMap.get(transfer.to_unit_id)
+        items.push({
+          id: `transfer-${transfer.id}`,
+          label: "Transfer completed",
+          detail: `${tenantName} moved to Unit ${toUnit?.unit_number ?? "?"}`,
+          time: getSafeTimeLabel(transfer.move_in_date || transfer.approved_date),
+          tone: "violet",
+        })
+      } else if (stage === "cancelled") {
+        items.push({
+          id: `transfer-${transfer.id}`,
+          label: "Transfer cancelled",
+          detail: transfer.denial_reason || `${tenantName} transfer was cancelled`,
+          time: getSafeTimeLabel(transfer.approved_date || transfer.requested_date),
+          tone: "red",
+        })
+      } else if (stage === "requested") {
+        items.push({
+          id: `transfer-${transfer.id}`,
+          label: "New transfer request",
+          detail: `${tenantName} requested a move`,
+          time: getSafeTimeLabel(transfer.requested_date),
+          tone: "zinc",
+        })
+      }
+    }
+
+    const renewedCandidates = scopedTenants
+      .filter((tenant) => (tenant.status ?? "").toLowerCase() === "active")
+      .filter((tenant) => {
+        const leaseDays = getDaysUntil(tenant.lease_end)
+        return leaseDays !== null && leaseDays > 180
+      })
+      .slice(0, 1)
+
+    for (const tenant of renewedCandidates) {
+      items.push({
+        id: `renew-${tenant.id}`,
+        label: "Lease active",
+        detail: `${tenant.first_name} ${tenant.last_name} has a stable lease`,
+        time: formatDateValue(tenant.lease_end),
         tone: "emerald",
       })
     }
 
-    if (actions.length === 0) {
-      actions.push({
-        id: "stable-state",
-        title: "No immediate actions detected",
-        description: "The current property scope looks stable right now. Use this time to review performance and keep the portfolio balanced.",
-        reason: "No current vacancy or notice pressure is showing.",
-        href: "/properties",
-        cta: "View portfolio",
-        tone: "emerald",
-      })
-    }
-
-    return actions.slice(0, 6)
-  }, [
-    scopedTenants,
-    propertyMap,
-    vacantUnits,
-    makeReadyUnits,
-    openTransfers,
-    noticeTenants,
-  ])
+    return items.slice(0, 4)
+  }, [scopedTransfers, scopedTenants, tenantMap, unitMap])
 
   if (loading) {
     return (
-      <div>
-        <h1 className="text-3xl font-semibold">Dashboard</h1>
-        <p className="mt-4 text-zinc-400">Loading dashboard...</p>
+      <div className="min-h-[60vh] bg-black px-8 py-10 text-white">
+        <h1 className="text-5xl font-semibold tracking-tight">Dashboard</h1>
+        <p className="mt-6 text-zinc-400">Loading dashboard...</p>
       </div>
     )
   }
 
   if (errorMessage) {
     return (
-      <div>
-        <h1 className="text-3xl font-semibold">Dashboard</h1>
-        <p className="mt-4 text-red-500">{errorMessage}</p>
+      <div className="min-h-[60vh] bg-black px-8 py-10 text-white">
+        <h1 className="text-5xl font-semibold tracking-tight">Dashboard</h1>
+        <p className="mt-6 text-red-400">{errorMessage}</p>
       </div>
     )
   }
 
   return (
-    <div>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold">Dashboard</h1>
-          <p className="mt-2 text-zinc-400">
-            {selectedProperty
-              ? `Live view for ${selectedProperty.name}.`
-              : "Live portfolio view for your properties, units, tenants, and transfers."}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-3">
-          <select
-            value={selectedPropertyId}
-            onChange={(e) => handleSelectedPropertyChange(e.target.value)}
-            className="rounded-xl border border-white/10 bg-black px-4 py-2 text-sm text-white"
-          >
-            <option value={ALL_PROPERTIES_VALUE}>All Properties</option>
-            {properties.map((property) => (
-              <option key={property.id} value={property.id}>
-                {property.name}
-              </option>
-            ))}
-          </select>
-
-          <Link
-            href="/transfers"
-            className="rounded-xl bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
-          >
-            + Create Transfer
-          </Link>
-          <Link
-            href="/properties"
-            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-200 hover:bg-white/5"
-          >
-            Add Property
-          </Link>
-          <Link
-            href="/tenants"
-            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-200 hover:bg-white/5"
-          >
-            Add Tenant
-          </Link>
-        </div>
-      </div>
-
-      <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div>
-            <p className="text-sm text-zinc-400">Current Scope</p>
-            <p className="mt-1 text-sm text-zinc-200">
-              {selectedProperty ? selectedProperty.name : "All Properties"}
-            </p>
-          </div>
-
-          <div>
-            <p className="text-sm text-zinc-400">System</p>
-            <p className="mt-1 text-sm text-zinc-200">Property Operations Platform</p>
-          </div>
-
-          <div>
-            <p className="text-sm text-zinc-400">Focus</p>
-            <p className="mt-1 text-sm text-zinc-200">
-              Coordinated internal tenant transfers
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Recommended Actions</h2>
-            <p className="mt-1 text-sm text-zinc-500">
-              Clear next steps based on the current property scope.
-            </p>
-          </div>
-          <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-zinc-400">
-            {selectedProperty ? "Property View" : "Portfolio View"}
-          </div>
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {recommendedActions.map((action) => (
-            <div
-              key={action.id}
-              className="rounded-xl border border-white/10 bg-black/20 p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-[220px] flex-1">
-                  <div
-                    className={`inline-flex rounded-full border px-3 py-1 text-xs ${getActionToneClasses(
-                      action.tone
-                    )}`}
-                  >
-                    Recommended
-                  </div>
-
-                  <h3 className="mt-3 text-base font-semibold text-white">
-                    {action.title}
-                  </h3>
-                  <p className="mt-2 text-sm text-zinc-300">{action.description}</p>
-                  <p className="mt-2 text-xs text-zinc-500">{action.reason}</p>
-                </div>
-
-                <Link
-                  href={action.href}
-                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
-                >
-                  {action.cta}
-                </Link>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Property Analytics</h2>
-            <p className="mt-1 text-sm text-zinc-500">
-              A live health report for the currently selected property scope.
-            </p>
-          </div>
-          <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-zinc-400">
-            {selectedProperty ? "Property View" : "Portfolio View"}
-          </div>
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
-          {analyticsCards.map((card) => (
-            <div
-              key={card.title}
-              className="rounded-xl border border-white/10 bg-black/20 p-4"
-            >
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <p className="text-sm text-zinc-400">{card.title}</p>
-                  <p className={`mt-2 text-3xl font-semibold ${card.valueClasses}`}>
-                    {card.value}
-                    <span className="ml-1 text-base text-zinc-500">{card.suffix}</span>
-                  </p>
-                </div>
-              </div>
-
-              <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
-                <div
-                  className={`h-full rounded-full ${card.barClasses}`}
-                  style={{ width: `${card.barValue}%` }}
-                />
-              </div>
-
-              <p className="mt-3 text-sm text-zinc-500">{card.subtext}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {metricTiles.map((metric) => (
-            <div
-              key={metric.title}
-              className="rounded-xl border border-white/10 bg-black/20 p-4"
-            >
-              <p className="text-sm text-zinc-400">{metric.title}</p>
-              <p className={`mt-2 text-2xl font-semibold ${metric.tone}`}>{metric.value}</p>
-              <p className="mt-2 text-sm text-zinc-500">{metric.subtext}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <p className="text-sm text-zinc-400">Occupancy Rate</p>
-          <p className="mt-3 text-3xl font-semibold">{occupancyRate}%</p>
-          <p className="mt-2 text-sm text-zinc-500">
-            {occupiedUnits} occupied out of {totalUnits} units
-          </p>
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <p className="text-sm text-zinc-400">Open Transfers</p>
-          <p className="mt-3 text-3xl font-semibold">{openTransfers}</p>
-          <p className="mt-2 text-sm text-zinc-500">
-            {requestedTransfers} requested • {approvedTransfers} approved • {scheduledTransfers} scheduled
-          </p>
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <p className="text-sm text-zinc-400">Tenant Health</p>
-          <p className="mt-3 text-3xl font-semibold">{activeTenants}</p>
-          <p className="mt-2 text-sm text-zinc-500">
-            {noticeTenants} on notice • {movedOutTenants} moved out
-          </p>
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <p className="text-sm text-zinc-400">
-            {selectedProperty ? "Property" : "Properties"}
-          </p>
-          <p className="mt-3 text-3xl font-semibold">
-            {selectedProperty ? 1 : properties.length}
-          </p>
-          <p className="mt-2 text-sm text-zinc-500">
-            {completedTransfers} completed transfers total
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Portfolio Snapshot</h2>
-            <Link href="/properties" className="text-sm text-blue-400 hover:text-blue-300">
-              View
-            </Link>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-              <span className="text-zinc-300">Total Units</span>
-              <span className="font-medium">{totalUnits}</span>
+    <div className="min-h-screen bg-black px-8 py-8 text-white">
+      <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-10 xl:grid-cols-[1.7fr_0.9fr]">
+        <section className="border-r border-white/8 pr-0 xl:pr-10">
+          <div className="mb-10 flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-sm uppercase tracking-[0.24em] text-zinc-500">
+                {new Date().toLocaleDateString(undefined, {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                })}
+              </p>
+              <h1 className="mt-8 max-w-4xl text-6xl font-semibold tracking-[-0.06em] text-white md:text-7xl">
+                What should I do right now?
+              </h1>
+              <p className="mt-6 text-2xl text-zinc-400">
+                You have {actionItems.length} item{actionItems.length === 1 ? "" : "s"} that need your decision.
+              </p>
             </div>
 
-            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-              <span className="text-zinc-300">Occupied</span>
-              <span className="font-medium">{occupiedUnits}</span>
-            </div>
-
-            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-              <span className="text-zinc-300">Vacant</span>
-              <span className="font-medium">{vacantUnits}</span>
-            </div>
-
-            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-              <span className="text-zinc-300">Make Ready</span>
-              <span className="font-medium">{makeReadyUnits}</span>
-            </div>
-
-            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-              <span className="text-zinc-300">Notice Units</span>
-              <span className="font-medium">{noticeUnits}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5 xl:col-span-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Recent Transfers</h2>
-            <Link href="/transfers" className="text-sm text-blue-400 hover:text-blue-300">
-              View all
-            </Link>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {recentTransfers.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
-                No transfers yet.
-              </div>
-            ) : (
-              recentTransfers.map((transfer) => {
-                const tenant = tenantMap.get(transfer.tenant_id)
-                const fromProperty = propertyMap.get(transfer.from_property_id)
-                const toProperty = propertyMap.get(transfer.to_property_id)
-
-                return (
-                  <div
-                    key={transfer.id}
-                    className="rounded-xl border border-white/10 bg-black/20 p-4"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="font-medium">
-                          {tenant
-                            ? `${tenant.first_name} ${tenant.last_name}`
-                            : "Unknown Tenant"}
-                        </p>
-                        <p className="mt-1 text-sm text-zinc-400">
-                          {fromProperty?.name ?? "Unknown Property"} →{" "}
-                          {toProperty?.name ?? "Unknown Property"}
-                        </p>
-                        <p className="mt-2 text-xs text-zinc-500">
-                          {formatTransferWindow(transfer.move_out_date, transfer.move_in_date)}
-                        </p>
-                      </div>
-
-                      <span
-                        className={`rounded-full border px-3 py-1 text-xs capitalize ${getTransferStatusClasses(
-                          transfer.status
-                        )}`}
-                      >
-                        {transfer.status}
-                      </span>
-                    </div>
-
-                    {transfer.notes ? (
-                      <p className="mt-3 text-sm text-zinc-400">{transfer.notes}</p>
-                    ) : null}
-                  </div>
-                )
-              })
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">
-              {selectedProperty ? "Selected Property Performance" : "Property Performance"}
-            </h2>
-            <Link href="/properties" className="text-sm text-blue-400 hover:text-blue-300">
-              Manage
-            </Link>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {propertySummaries.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
-                No properties created yet.
-              </div>
-            ) : (
-              propertySummaries.map((summary) => (
-                <div
-                  key={summary.property.id}
-                  className="rounded-xl border border-white/10 bg-black/20 p-4"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{summary.property.name}</p>
-                      <p className="mt-1 text-sm text-zinc-400">
-                        {summary.totalUnits} units • {summary.tenants} tenants
-                      </p>
-                    </div>
-
-                    <div className="text-right">
-                      <p className="text-lg font-semibold">{summary.occupancy}%</p>
-                      <p className="text-xs text-zinc-500">occupied</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-                    <div
-                      className={`h-full rounded-full ${getBarToneClasses(summary.occupancy)}`}
-                      style={{ width: `${summary.occupancy}%` }}
-                    />
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Setup Checklist</h2>
-            <span className="text-sm text-zinc-500">
-              {setupChecklist.filter((item) => item.done).length}/{setupChecklist.length}
-            </span>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {setupChecklist.map((item) => (
-              <div
-                key={item.label}
-                className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 p-4"
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={selectedPropertyId}
+                onChange={(e) => {
+                  setSelectedPropertyId(e.target.value)
+                  setStoredSelectedPropertyId(e.target.value)
+                }}
+                className="border border-white/10 bg-transparent px-4 py-3 text-sm text-white outline-none transition hover:border-white/20"
               >
-                <div>
-                  <p className="font-medium">{item.label}</p>
-                  <p className="mt-1 text-sm text-zinc-500">
-                    {item.done ? "Completed" : "Still needed"}
-                  </p>
-                </div>
+                <option value={ALL_PROPERTIES_VALUE} className="bg-black text-white">
+                  All Properties
+                </option>
+                {properties.map((property) => (
+                  <option key={property.id} value={property.id} className="bg-black text-white">
+                    {property.name}
+                  </option>
+                ))}
+              </select>
 
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs ${
-                      item.done
-                        ? "bg-emerald-500/20 text-emerald-300"
-                        : "bg-zinc-800 text-zinc-300"
-                    }`}
-                  >
-                    {item.done ? "Done" : "Pending"}
-                  </span>
-
-                  {!item.done ? (
-                    <Link
-                      href={item.href}
-                      className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
-                    >
-                      Go
-                    </Link>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Unit Status Board</h2>
-          <Link href="/properties" className="text-sm text-blue-400 hover:text-blue-300">
-            Open properties
-          </Link>
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {scopedUnits.length === 0 ? (
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-400">
-              No units found yet.
+              <Link
+                href="/transfers"
+                className="border border-violet-500/30 px-4 py-3 text-sm text-violet-300 transition hover:bg-violet-500/10"
+              >
+                Create transfer
+              </Link>
             </div>
-          ) : (
-            scopedUnits.slice(0, 12).map((unit) => {
-              const property = propertyMap.get(unit.property_id)
-              const tenant = scopedTenants.find((item) => item.unit_id === unit.id)
+          </div>
+
+          <div className="space-y-0">
+            {actionItems.map((item, index) => {
+              const tone = getToneClasses(item.level)
 
               return (
                 <div
-                  key={unit.id}
-                  className="rounded-xl border border-white/10 bg-black/20 p-4"
+                  key={item.id}
+                  className={`grid grid-cols-[90px_1fr_auto] items-center gap-6 border-b border-white/8 py-10 ${
+                    index === 0 ? "border-t border-white/8" : ""
+                  }`}
                 >
-                  <p className="font-medium">
-                    {property?.name ?? "Unknown Property"} • Unit {unit.unit_number}
-                  </p>
-                  <p className={`mt-2 text-sm ${getUnitStatusClasses(unit.status)}`}>
-                    {unit.status?.replaceAll("_", " ") ?? "unknown"}
-                  </p>
-                  <p className="mt-2 text-sm text-zinc-500">
-                    {tenant
-                      ? `${tenant.first_name} ${tenant.last_name}`
-                      : "No assigned tenant"}
-                  </p>
+                  <div className={`text-8xl font-semibold tracking-[-0.08em] ${tone.number}`}>
+                    {item.priorityNumber}
+                  </div>
+
+                  <div>
+                    <div className="flex items-center gap-3">
+                      <span className={`h-2.5 w-2.5 rounded-full ${tone.dot}`} />
+                      <p className={`text-xs uppercase tracking-[0.22em] ${tone.label}`}>
+                        {item.level === "high"
+                          ? "High Priority"
+                          : item.level === "pending"
+                            ? "Pending"
+                            : "At Risk"}
+                      </p>
+                    </div>
+
+                    <h2 className="mt-4 text-4xl font-medium tracking-[-0.04em] text-white">
+                      {item.title}
+                    </h2>
+
+                    <p className="mt-3 text-xl text-zinc-300">{item.subtitle}</p>
+                    <p className="mt-3 text-base text-zinc-500">{item.detail}</p>
+                  </div>
+
+                  <Link
+                    href={item.href}
+                    className={`inline-flex items-center gap-3 border px-5 py-4 text-sm font-medium transition ${tone.button}`}
+                  >
+                    {item.accent}
+                    <span className="text-xl">→</span>
+                  </Link>
                 </div>
               )
-            })
-          )}
-        </div>
+            })}
+          </div>
+
+          <div className="mt-10 flex items-center gap-3 text-zinc-500">
+            <span className="inline-block h-1 w-8 bg-violet-500" />
+            {actionItems[0]?.title === "No urgent decisions right now"
+              ? "You're clear. No urgent actions."
+              : "Stay focused on the decision queue."}
+          </div>
+        </section>
+
+        <aside className="space-y-10">
+          <section>
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm uppercase tracking-[0.18em] text-zinc-500">
+                  {selectedPropertyName}
+                </p>
+                <h2 className="mt-2 text-2xl font-medium tracking-[-0.04em] text-white">
+                  Transfer pipeline
+                </h2>
+              </div>
+
+              <div className="text-right">
+                <p className="text-sm text-zinc-500">Occupancy</p>
+                <p className="mt-1 text-3xl font-semibold tracking-[-0.04em] text-white">
+                  {occupancy}%
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {[
+                {
+                  label: "Requested",
+                  value: requestedTransfers.length,
+                  sub: "Waiting for review",
+                  active: true,
+                },
+                {
+                  label: "Approved",
+                  value: approvedTransfers.length,
+                  sub: "Ready to schedule",
+                  active: true,
+                },
+                {
+                  label: "Scheduled",
+                  value: scheduledTransfers.length,
+                  sub: "Move-in scheduled",
+                  active: true,
+                },
+                {
+                  label: "Completed",
+                  value: completedThisScope.length,
+                  sub: "This scope",
+                  active: false,
+                },
+              ].map((row, index) => (
+                <div key={row.label} className="flex items-start gap-5">
+                  <div className="flex flex-col items-center">
+                    <div
+                      className={`flex h-10 w-10 items-center justify-center rounded-full border ${
+                        row.active
+                          ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
+                          : "border-white/10 bg-white/5 text-zinc-300"
+                      }`}
+                    >
+                      {index + 1}
+                    </div>
+                    {index < 3 ? <div className="mt-2 h-10 w-px bg-white/10" /> : null}
+                  </div>
+
+                  <div className="flex-1 border-b border-white/8 pb-5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-2xl font-medium tracking-[-0.03em] text-white">
+                          {row.label}
+                        </p>
+                        <p className="mt-2 text-sm text-zinc-500">{row.sub}</p>
+                      </div>
+                      <p className="text-2xl font-semibold tracking-[-0.04em] text-white">
+                        {row.value}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <div className="mb-5 flex items-center justify-between gap-4">
+              <h2 className="text-2xl font-medium tracking-[-0.04em] text-white">
+                Upcoming expirations
+              </h2>
+              <Link href="/tenants" className="text-sm text-violet-300 hover:text-violet-200">
+                View all
+              </Link>
+            </div>
+
+            <div className="space-y-5">
+              {upcomingExpirations.length > 0 ? (
+                upcomingExpirations.map((tenant) => {
+                  const unit = unitMap.get(tenant.unit_id)
+                  const days = getDaysUntil(tenant.lease_end)
+
+                  return (
+                    <Link
+                      href="/tenants"
+                      key={tenant.id}
+                      className="flex items-start justify-between gap-4 border-b border-white/8 pb-5 transition hover:border-violet-500/20"
+                    >
+                      <div className="min-w-[72px]">
+                        <p
+                          className={`text-4xl font-semibold tracking-[-0.06em] ${
+                            days !== null && days <= 7 ? "text-orange-400" : "text-amber-300"
+                          }`}
+                        >
+                          {days === null ? "—" : days}
+                        </p>
+                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                          {days === 1 ? "Day" : "Days"}
+                        </p>
+                      </div>
+
+                      <div className="flex-1">
+                        <p className="text-xl font-medium text-white">
+                          {tenant.first_name} {tenant.last_name}
+                        </p>
+                        <p className="mt-2 text-sm text-zinc-400">
+                          Unit {unit?.unit_number ?? "?"} • {propertyMap.get(tenant.property_id)?.name ?? "Unknown Property"}
+                        </p>
+                      </div>
+
+                      <div className="pt-1 text-zinc-500">→</div>
+                    </Link>
+                  )
+                })
+              ) : (
+                <div className="border-b border-white/8 pb-5 text-zinc-500">
+                  No notice tenants in this scope.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <div className="mb-5 flex items-center justify-between gap-4">
+              <h2 className="text-2xl font-medium tracking-[-0.04em] text-white">
+                Recent activity
+              </h2>
+              <Link href="/transfers" className="text-sm text-violet-300 hover:text-violet-200">
+                View all
+              </Link>
+            </div>
+
+            <div className="space-y-4">
+              {recentActivity.length > 0 ? (
+                recentActivity.map((item) => (
+                  <div key={item.id} className="flex items-start gap-4 border-b border-white/8 pb-4">
+                    <div
+                      className={`mt-1 flex h-10 w-10 items-center justify-center rounded-full text-sm ${getActivityToneClasses(
+                        item.tone
+                      )}`}
+                    >
+                      •
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="text-base font-medium text-white">{item.label}</p>
+                      <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>
+                    </div>
+
+                    <p className="whitespace-nowrap text-sm text-zinc-500">{item.time}</p>
+                  </div>
+                ))
+              ) : (
+                <div className="border-b border-white/8 pb-5 text-zinc-500">
+                  No recent activity in this scope.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="border-t border-white/8 pt-6">
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <Link
+                href="/tenants"
+                className="border border-white/10 px-4 py-4 text-zinc-200 transition hover:border-white/20 hover:bg-white/5"
+              >
+                <p className="text-zinc-500">Tenants on notice</p>
+                <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
+                  {noticeTenants.length}
+                </p>
+              </Link>
+
+              <Link
+                href="/properties"
+                className="border border-white/10 px-4 py-4 text-zinc-200 transition hover:border-white/20 hover:bg-white/5"
+              >
+                <p className="text-zinc-500">Vacant units</p>
+                <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
+                  {
+                    scopedUnits.filter((unit) => (unit.status ?? "").toLowerCase() === "vacant")
+                      .length
+                  }
+                </p>
+              </Link>
+            </div>
+          </section>
+        </aside>
       </div>
     </div>
   )

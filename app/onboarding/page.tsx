@@ -5,7 +5,13 @@ import OnboardingPageClient from "./OnboardingPageClient"
 
 export default function OnboardingPage() {
   return (
-    <Suspense fallback={<div className="p-6 text-white">Redirecting...</div>}>
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-zinc-950 p-6 text-white">
+          Loading onboarding...
+        </div>
+      }
+    >
       <OnboardingPageClient />
     </Suspense>
   )

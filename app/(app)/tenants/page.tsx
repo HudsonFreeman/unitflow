@@ -448,6 +448,10 @@ export default function TenantsPage() {
   const [bulkCsvText, setBulkCsvText] = useState("")
   const [bulkFileName, setBulkFileName] = useState("")
 
+  const [renewingTenant, setRenewingTenant] = useState<TenantRow | null>(null)
+  const [renewLeaseEnd, setRenewLeaseEnd] = useState("")
+  const [renewCancelTransfers, setRenewCancelTransfers] = useState(true)
+
   const PAGE_SIZE = 12
 
   function clearMessages() {
@@ -556,6 +560,18 @@ export default function TenantsPage() {
     setSelectedPropertyId(nextPropertyId)
     setStoredSelectedPropertyId(nextPropertyId)
     setSelectedUnitId("")
+  }
+
+  function openRenewLeaseModal(tenant: TenantRow) {
+    setRenewingTenant(tenant)
+    setRenewLeaseEnd("")
+    setRenewCancelTransfers(true)
+  }
+
+  function closeRenewLeaseModal() {
+    setRenewingTenant(null)
+    setRenewLeaseEnd("")
+    setRenewCancelTransfers(true)
   }
 
   const selectedProperty =
@@ -764,48 +780,50 @@ export default function TenantsPage() {
 
     setSubmitting(true)
 
-    const { error: tenantInsertError } = await supabaseClient.from("tenants").insert([
-      {
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: emailInput.trim() || null,
-        phone: phone.trim() || null,
-        property_id: selectedPropertyId,
-        unit_id: selectedUnitId,
-        lease_start: leaseStart || null,
-        lease_end: leaseEnd || null,
-        status: "active",
-      },
-    ])
+    try {
+      const formData = new FormData()
+      formData.append("property_id", selectedPropertyId)
+      formData.append("unit_id", selectedUnitId)
+      formData.append("first_name", firstName.trim())
+      formData.append("last_name", lastName.trim())
+      formData.append("email", emailInput.trim())
+      formData.append("phone", phone.trim())
+      formData.append("lease_start", leaseStart || "")
+      formData.append("lease_end", leaseEnd || "")
 
-    if (tenantInsertError) {
-      setErrorMessage(tenantInsertError.message)
+      const response = await fetch("/api/tenants", {
+        method: "POST",
+        body: formData,
+      })
+
+      const contentType = response.headers.get("content-type") || ""
+
+      if (!response.ok) {
+        if (contentType.includes("application/json")) {
+          const result = await response.json()
+          setErrorMessage(result.error ?? "Failed to create tenant.")
+        } else {
+          setErrorMessage("Failed to create tenant.")
+        }
+        setSubmitting(false)
+        return
+      }
+
+      setSelectedUnitId("")
+      setFirstName("")
+      setLastName("")
+      setEmailInput("")
+      setPhone("")
+      setLeaseStart("")
+      setLeaseEnd("")
       setSubmitting(false)
-      return
-    }
 
-    const { error: unitUpdateError } = await supabaseClient
-      .from("units")
-      .update({ status: "occupied" })
-      .eq("id", selectedUnitId)
-
-    if (unitUpdateError) {
-      setErrorMessage(unitUpdateError.message)
+      showToast("Tenant created.", "success")
+      await loadTenantsPage()
+    } catch {
+      setErrorMessage("Failed to create tenant.")
       setSubmitting(false)
-      return
     }
-
-    setSelectedUnitId("")
-    setFirstName("")
-    setLastName("")
-    setEmailInput("")
-    setPhone("")
-    setLeaseStart("")
-    setLeaseEnd("")
-    setSubmitting(false)
-
-    showToast("Tenant created.", "success")
-    await loadTenantsPage()
   }
 
   async function handleGiveNotice(tenantId: string) {
@@ -926,6 +944,84 @@ export default function TenantsPage() {
     setSelectedTenantIds((current) => current.filter((id) => id !== tenantId))
     setActionLoadingId("")
     showToast("Tenant moved out.", "success")
+  }
+
+  async function handleConfirmRenewLease() {
+    clearMessages()
+
+    if (!renewingTenant) {
+      setErrorMessage("No tenant selected.")
+      return
+    }
+
+    if (!renewLeaseEnd) {
+      setErrorMessage("New lease end date is required.")
+      return
+    }
+
+    setActionLoadingId(renewingTenant.id)
+
+    const { error: tenantError } = await supabaseClient
+      .from("tenants")
+      .update({
+        lease_end: renewLeaseEnd,
+        status: "active",
+      })
+      .eq("id", renewingTenant.id)
+
+    if (tenantError) {
+      setErrorMessage(tenantError.message)
+      setActionLoadingId("")
+      return
+    }
+
+    const { error: unitError } = await supabaseClient
+      .from("units")
+      .update({ status: "occupied" })
+      .eq("id", renewingTenant.unit_id)
+
+    if (unitError) {
+      setErrorMessage(unitError.message)
+      setActionLoadingId("")
+      return
+    }
+
+    if (renewCancelTransfers) {
+      const { error: transferError } = await supabaseClient
+        .from("transfers")
+        .update({
+          status: "cancelled",
+          denial_reason: "Renewed lease",
+        })
+        .eq("tenant_id", renewingTenant.id)
+        .in("status", ["requested", "approved", "scheduled"])
+
+      if (transferError) {
+        setErrorMessage(transferError.message)
+        setActionLoadingId("")
+        return
+      }
+    }
+
+    setTenants((current) =>
+      current.map((item) =>
+        item.id === renewingTenant.id
+          ? { ...item, status: "active", lease_end: renewLeaseEnd }
+          : item
+      )
+    )
+
+    setUnits((current) =>
+      current.map((item) =>
+        item.id === renewingTenant.unit_id ? { ...item, status: "occupied" } : item
+      )
+    )
+
+    setSelectedTenantIds((current) => current.filter((id) => id !== renewingTenant.id))
+    setActionLoadingId("")
+    closeRenewLeaseModal()
+    showToast("Lease renewed.", "success")
+    await loadTenantsPage()
   }
 
   async function handleBulkGiveNotice() {
@@ -1280,6 +1376,66 @@ export default function TenantsPage() {
             }`}
           >
             {toast.message}
+          </div>
+        </div>
+      ) : null}
+
+      {renewingTenant ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-900 p-6">
+            <h2 className="text-xl font-semibold">Renew Lease</h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              Update the lease for {renewingTenant.first_name} {renewingTenant.last_name} and return them to active status.
+            </p>
+
+            <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-4">
+              <p className="text-sm text-zinc-300">
+                Current lease end: {formatDate(renewingTenant.lease_end)}
+              </p>
+              <p className="mt-1 text-sm text-zinc-500">
+                Unit {unitMap.get(renewingTenant.unit_id)?.unit_number ?? "?"} •{" "}
+                {propertyMap.get(renewingTenant.property_id)?.name ?? "Unknown Property"}
+              </p>
+            </div>
+
+            <div className="mt-4">
+              <label className="mb-2 block text-sm text-zinc-400">New Lease End Date</label>
+              <input
+                type="date"
+                value={renewLeaseEnd}
+                onChange={(e) => setRenewLeaseEnd(e.target.value)}
+                className="w-full rounded bg-black p-2"
+              />
+            </div>
+
+            <label className="mt-4 flex items-start gap-3 text-sm text-zinc-300">
+              <input
+                type="checkbox"
+                checked={renewCancelTransfers}
+                onChange={(e) => setRenewCancelTransfers(e.target.checked)}
+                className="mt-1 h-4 w-4 rounded border-white/10 bg-black"
+              />
+              <span>Cancel any open transfer requests for this tenant</span>
+            </label>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeRenewLeaseModal}
+                className="rounded bg-zinc-700 px-4 py-2 text-sm text-white hover:bg-zinc-600"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={handleConfirmRenewLease}
+                disabled={actionLoadingId === renewingTenant.id}
+                className="rounded bg-emerald-600 px-4 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {actionLoadingId === renewingTenant.id ? "Renewing..." : "Confirm Renewal"}
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -1665,14 +1821,25 @@ export default function TenantsPage() {
                             ) : null}
 
                             {status === "notice" ? (
-                              <button
-                                type="button"
-                                onClick={() => handleMoveOut(tenant.id)}
-                                disabled={isActionLoading}
-                                className="rounded bg-zinc-700 px-3 py-2 text-xs text-white hover:bg-zinc-600 disabled:opacity-60"
-                              >
-                                {isActionLoading ? "Updating..." : "Move Out"}
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => openRenewLeaseModal(tenant)}
+                                  disabled={isActionLoading}
+                                  className="rounded bg-emerald-600 px-3 py-2 text-xs text-white hover:bg-emerald-700 disabled:opacity-60"
+                                >
+                                  Renew Lease
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleMoveOut(tenant.id)}
+                                  disabled={isActionLoading}
+                                  className="rounded bg-zinc-700 px-3 py-2 text-xs text-white hover:bg-zinc-600 disabled:opacity-60"
+                                >
+                                  {isActionLoading ? "Updating..." : "Move Out"}
+                                </button>
+                              </>
                             ) : null}
                           </div>
                         </td>
@@ -1856,8 +2023,8 @@ export default function TenantsPage() {
                 {!selectedProperty
                   ? "Select Specific Property First"
                   : availableUnits.length === 0
-                  ? "No available units"
-                  : "Select Unit"}
+                    ? "No available units"
+                    : "Select Unit"}
               </option>
               {availableUnits.map((unit) => (
                 <option key={unit.id} value={unit.id}>
@@ -1930,9 +2097,9 @@ export default function TenantsPage() {
           <button
             type="submit"
             disabled={submitting || !selectedProperty}
-            className="mt-2 rounded bg-blue-600 p-2 hover:bg-blue-700 disabled:opacity-60"
+            className="mt-2 rounded bg-blue-600 p-2 text-white hover:bg-blue-700 disabled:opacity-60"
           >
-            {submitting ? "Creating..." : "Create Tenant"}
+            {submitting ? "Creating Tenant..." : "Create Tenant"}
           </button>
         </form>
       </div>

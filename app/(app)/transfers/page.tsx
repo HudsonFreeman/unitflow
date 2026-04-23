@@ -16,6 +16,7 @@ type TransferRow = {
   move_out_date: string | null
   move_in_date: string | null
   notes: string | null
+  denial_reason?: string | null
   tenant_id: string
   from_property_id: string
   from_unit_id: string
@@ -105,6 +106,8 @@ function getPipelineStage(transfer: TransferRow) {
     if (transfer.move_out_date || transfer.move_in_date) return "scheduled"
     return "approved"
   }
+  if (status === "cancelled") return "cancelled"
+
   return "requested"
 }
 
@@ -212,6 +215,174 @@ function getMoveVsLeaseLabel(moveInDate?: string, leaseEnd?: string | null) {
   return `Move is ${diff} day(s) before lease end`
 }
 
+function getTransferDestinationTiming(
+  transfer: TransferRow,
+  destinationUnit: UnitRow | undefined,
+  tenants: TenantRow[],
+  transfers: TransferRow[]
+) {
+  if (!destinationUnit) {
+    return {
+      expectedDate: null as Date | null,
+      gap: null as number | null,
+      label: "Unknown timing",
+    }
+  }
+
+  const expectedDate = getExpectedAvailableDate(destinationUnit, tenants, transfers)
+
+  let gap: number | null = null
+  if (expectedDate && transfer.move_in_date) {
+    const requestedMoveIn = new Date(transfer.move_in_date)
+    if (!Number.isNaN(requestedMoveIn.getTime())) {
+      gap = Math.round(
+        (expectedDate.getTime() - requestedMoveIn.getTime()) / (1000 * 60 * 60 * 24)
+      )
+    }
+  }
+
+  return {
+    expectedDate,
+    gap,
+    label: getTimingLabel(gap),
+  }
+}
+
+function getApprovalWarnings(
+  transfer: TransferRow,
+  tenant: TenantRow | undefined,
+  destinationUnit: UnitRow | undefined,
+  tenants: TenantRow[],
+  transfers: TransferRow[]
+) {
+  const warnings: string[] = []
+
+  if (tenant?.lease_end && transfer.move_in_date) {
+    const diff = getDateDiffInDays(transfer.move_in_date, tenant.lease_end)
+
+    if (diff !== null && diff >= 0 && diff < 30) {
+      warnings.push(`Tenant has only ${diff} day(s) remaining on lease at move-in.`)
+    } else if (diff !== null && diff < 0) {
+      warnings.push(`Move-in happens ${Math.abs(diff)} day(s) after lease end.`)
+    }
+  }
+
+  if (transfer.move_out_date && transfer.move_in_date) {
+    const gap = getDateDiffInDays(transfer.move_out_date, transfer.move_in_date)
+
+    if (gap !== null) {
+      if (gap < 0) {
+        warnings.push(`Move-in occurs before move-out by ${Math.abs(gap)} day(s).`)
+      } else if (gap > 1) {
+        warnings.push(`Transfer creates a vacancy gap of ${gap} day(s).`)
+      }
+    }
+  }
+
+  if (!transfer.move_out_date || !transfer.move_in_date) {
+    warnings.push("Transfer is missing move-out or move-in date.")
+  }
+
+  const destinationTiming = getTransferDestinationTiming(
+    transfer,
+    destinationUnit,
+    tenants,
+    transfers
+  )
+
+  if (!destinationUnit) {
+    warnings.push("Destination unit could not be found.")
+  } else if (destinationTiming.label === "Unknown timing") {
+    warnings.push(
+      `Destination unit timing is unknown for Unit ${destinationUnit.unit_number}.`
+    )
+  } else if (
+    (destinationTiming.label === "Slight delay" ||
+      destinationTiming.label === "Too late") &&
+    destinationTiming.gap !== null
+  ) {
+    warnings.push(
+      `Destination unit is expected to be ready ${destinationTiming.gap} day(s) after requested move-in.`
+    )
+  } else if (
+    destinationTiming.label === "Available early" &&
+    destinationTiming.gap !== null &&
+    Math.abs(destinationTiming.gap) > 14
+  ) {
+    warnings.push(
+      `Destination unit is available ${Math.abs(destinationTiming.gap)} day(s) before requested move-in.`
+    )
+  }
+
+  return warnings
+}
+
+
+
+function getDestinationOccupant(
+  transfer: TransferRow,
+  tenants: TenantRow[]
+) {
+  return tenants.find(
+    (tenant) =>
+      tenant.unit_id === transfer.to_unit_id &&
+      tenant.id !== transfer.tenant_id &&
+      !["moved_out", "transferred"].includes((tenant.status ?? "").toLowerCase())
+  )
+}
+
+function getTransferTimelineSummary(
+  transfer: TransferRow,
+  tenants: TenantRow[],
+  units: UnitRow[]
+) {
+  const destinationOccupant = getDestinationOccupant(transfer, tenants)
+  const destinationUnit = units.find((unit) => unit.id === transfer.to_unit_id)
+
+  const currentOccupantLeaveDate =
+    transfer.move_out_date ||
+    destinationOccupant?.lease_end ||
+    null
+
+  const requestedMoveInDate = transfer.move_in_date || null
+
+  const gapDays =
+    currentOccupantLeaveDate && requestedMoveInDate
+      ? getDateDiffInDays(currentOccupantLeaveDate, requestedMoveInDate)
+      : null
+
+  let resultLabel = "Missing timing"
+  let toneClasses = "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
+  let detailLabel = "Add move dates to understand whether this handoff works."
+
+  if (gapDays !== null) {
+    if (gapDays === 0) {
+      resultLabel = "Clean handoff"
+      toneClasses = "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+      detailLabel = "No vacancy gap. Occupant leaves and incoming tenant moves in the same day."
+    } else if (gapDays > 0) {
+      resultLabel = `${gapDays} day vacancy gap`
+      toneClasses = "border-amber-500/20 bg-amber-500/10 text-amber-300"
+      detailLabel = `The unit sits empty for ${gapDays} day(s) before the incoming tenant arrives.`
+    } else {
+      resultLabel = `${Math.abs(gapDays)} day overlap`
+      toneClasses = "border-red-500/20 bg-red-500/10 text-red-300"
+      detailLabel = `The incoming tenant wants to move in ${Math.abs(gapDays)} day(s) before the destination unit is actually available.`
+    }
+  }
+
+  return {
+    destinationOccupant,
+    destinationUnit,
+    currentOccupantLeaveDate,
+    requestedMoveInDate,
+    gapDays,
+    resultLabel,
+    toneClasses,
+    detailLabel,
+  }
+}
+
 export default function TransfersPage() {
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
@@ -227,6 +398,8 @@ export default function TransfersPage() {
   const [moveInDate, setMoveInDate] = useState("")
   const [notes, setNotes] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
+  const [confirmApproveTransfer, setConfirmApproveTransfer] = useState<TransferRow | null>(null)
+  const [denyReasonByTransfer, setDenyReasonByTransfer] = useState<Record<string, string>>({})
 
   const [transfers, setTransfers] = useState<TransferRow[]>([])
   const [tenants, setTenants] = useState<TenantRow[]>([])
@@ -236,6 +409,20 @@ export default function TransfersPage() {
   function clearMessages() {
     setErrorMessage("")
     setSuccessMessage("")
+  }
+
+  function scrollToTransferList() {
+    setTimeout(() => {
+      document.getElementById("transfer-list-section")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      })
+    }, 50)
+  }
+
+  function handlePipelineFilter(nextFilter: string) {
+    setStatusFilter(nextFilter)
+    scrollToTransferList()
   }
 
   function handleSelectedPropertyChange(nextPropertyId: string) {
@@ -267,11 +454,10 @@ export default function TransfersPage() {
     setErrorMessage("")
 
     const {
-      data: { user },
-      error: userError,
-    } = await supabaseClient.auth.getUser()
+      data: { session },
+    } = await supabaseClient.auth.getSession()
 
-    if (userError || !user) {
+    if (!session) {
       setErrorMessage("You must be logged in to view transfers.")
       setLoading(false)
       return
@@ -286,7 +472,7 @@ export default function TransfersPage() {
       supabaseClient
         .from("transfers")
         .select(
-          "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
+          "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
         )
         .order("created_at", { ascending: false }),
       supabaseClient
@@ -406,7 +592,11 @@ export default function TransfersPage() {
 
   const scopedTransfers = useMemo(() => {
     if (selectedPropertyId === ALL_PROPERTIES_VALUE) return transfers
-    return transfers.filter((transfer) => transfer.from_property_id === selectedPropertyId)
+    return transfers.filter(
+      (transfer) =>
+        transfer.from_property_id === selectedPropertyId ||
+        transfer.to_property_id === selectedPropertyId
+    )
   }, [transfers, selectedPropertyId])
 
   const selectedTenant = scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
@@ -485,20 +675,24 @@ export default function TransfersPage() {
     if (statusFilter === "all") return scopedTransfers
 
     return scopedTransfers.filter(
-      (transfer) => transfer.status.toLowerCase() === statusFilter.toLowerCase()
+      (transfer) => getPipelineStage(transfer).toLowerCase() === statusFilter.toLowerCase()
     )
   }, [scopedTransfers, statusFilter])
 
   const requestedCount = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "requested"
+    (transfer) => getPipelineStage(transfer) === "requested"
   ).length
 
   const approvedCount = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "approved"
+    (transfer) => getPipelineStage(transfer) === "approved"
+  ).length
+
+  const scheduledCount = scopedTransfers.filter(
+    (transfer) => getPipelineStage(transfer) === "scheduled"
   ).length
 
   const completedCount = scopedTransfers.filter(
-    (transfer) => transfer.status.toLowerCase() === "completed"
+    (transfer) => getPipelineStage(transfer) === "completed"
   ).length
 
   const pipelineCounts = useMemo(() => {
@@ -511,7 +705,10 @@ export default function TransfersPage() {
 
     for (const transfer of scopedTransfers) {
       const stage = getPipelineStage(transfer)
-      counts[stage] += 1
+
+      if (stage === "requested" || stage === "approved" || stage === "scheduled" || stage === "completed") {
+        counts[stage] += 1
+      }
     }
 
     return counts
@@ -575,7 +772,6 @@ export default function TransfersPage() {
 
     return results
   }, [openTransfers])
-
   const transfersRequiringReview = useMemo(() => {
     return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "requested").length
   }, [scopedTransfers])
@@ -587,6 +783,119 @@ export default function TransfersPage() {
   const scheduledTransfers = useMemo(() => {
     return scopedTransfers.filter((transfer) => getPipelineStage(transfer) === "scheduled").length
   }, [scopedTransfers])
+
+
+  const liveAttentionItems = useMemo(() => {
+    const items: Array<{
+      id: string
+      level: "high" | "pending" | "risk"
+      title: string
+      subtitle: string
+      actionLabel: string
+      actionFilter: string
+    }> = []
+
+    const requestedOpenCount = openTransfers.filter(
+      (transfer) => getPipelineStage(transfer) === "requested"
+    ).length
+
+    const approvedOpenCount = openTransfers.filter(
+      (transfer) => getPipelineStage(transfer) === "approved"
+    ).length
+
+    const activeRiskCount = openTransfers.filter((transfer) => {
+      const timeline = getTransferTimelineSummary(transfer, tenants, units)
+      return timeline.gapDays === null || (timeline.gapDays !== null && timeline.gapDays !== 0)
+    }).length
+
+    if (requestedOpenCount > 0) {
+      items.push({
+        id: "needs-approval",
+        level: "high",
+        title: `${requestedOpenCount} transfer${requestedOpenCount === 1 ? "" : "s"} need approval`,
+        subtitle: "These requests are waiting on a decision.",
+        actionLabel: "Review requested",
+        actionFilter: "requested",
+      })
+    }
+
+    if (approvedOpenCount > 0) {
+      items.push({
+        id: "needs-completion",
+        level: "pending",
+        title: `${approvedOpenCount} approved transfer${approvedOpenCount === 1 ? "" : "s"} still need completion`,
+        subtitle: "These moves are approved but not yet finished in the system.",
+        actionLabel: "Review approved",
+        actionFilter: "approved",
+      })
+    }
+
+    if (activeRiskCount > 0) {
+      items.push({
+        id: "active-risk",
+        level: "risk",
+        title: `${activeRiskCount} active transfer${activeRiskCount === 1 ? "" : "s"} have timing issues`,
+        subtitle: "These open transfers create a gap, overlap, or missing-date problem.",
+        actionLabel: "Review risk",
+        actionFilter: "all",
+      })
+    }
+
+    if (items.length === 0) {
+      items.push({
+        id: "clear",
+        level: "pending",
+        title: "No active transfer issues right now",
+        subtitle: "There are no open transfers that need attention in this scope.",
+        actionLabel: "View all",
+        actionFilter: "all",
+      })
+    }
+
+    return items
+  }, [openTransfers, tenants, units])
+
+  const timelineCards = useMemo(() => {
+    return openTransfers.map((transfer) => {
+      const tenant = tenantMap.get(transfer.tenant_id)
+      const fromProperty = propertyMap.get(transfer.from_property_id)
+      const toProperty = propertyMap.get(transfer.to_property_id)
+      const fromUnit = unitMap.get(transfer.from_unit_id)
+      const timeline = getTransferTimelineSummary(transfer, tenants, units)
+
+      return {
+        transfer,
+        tenant,
+        fromProperty,
+        toProperty,
+        fromUnit,
+        ...timeline,
+      }
+    })
+  }, [openTransfers, propertyMap, tenantMap, tenants, unitMap, units])
+
+  const transferHistoryCards = useMemo(() => {
+    return scopedTransfers
+      .filter((transfer) => ["completed", "cancelled"].includes((transfer.status ?? "").toLowerCase()))
+      .slice(0, 6)
+      .map((transfer) => {
+        const tenant = tenantMap.get(transfer.tenant_id)
+        const fromProperty = propertyMap.get(transfer.from_property_id)
+        const toProperty = propertyMap.get(transfer.to_property_id)
+        const fromUnit = unitMap.get(transfer.from_unit_id)
+        const toUnit = unitMap.get(transfer.to_unit_id)
+
+        return {
+          transfer,
+          tenant,
+          fromProperty,
+          toProperty,
+          fromUnit,
+          toUnit,
+        }
+      })
+  }, [propertyMap, scopedTransfers, tenantMap, unitMap])
+
 
   async function handleCreateTransfer(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -654,6 +963,8 @@ export default function TransfersPage() {
       setSubmitting(false)
 
       await loadTransfersPage()
+      setStatusFilter("requested")
+      scrollToTransferList()
     } catch {
       setErrorMessage("Failed to create transfer.")
       setSubmitting(false)
@@ -686,8 +997,50 @@ export default function TransfersPage() {
       setActionLoadingId("")
       setSuccessMessage("Transfer approved.")
       await loadTransfersPage()
+      setStatusFilter("approved")
+      scrollToTransferList()
     } catch {
       setErrorMessage("Failed to approve transfer.")
+      setActionLoadingId("")
+    }
+  }
+
+  async function handleDenyTransfer(transferId: string) {
+    clearMessages()
+    setActionLoadingId(transferId)
+
+    try {
+      const response = await fetch("/api/transfers/deny", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          transfer_id: transferId,
+          denial_reason: denyReasonByTransfer[transferId] || "Not specified",
+        }),
+      })
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        setErrorMessage(result.error ?? "Failed to deny transfer.")
+        setActionLoadingId("")
+        return
+      }
+
+      setActionLoadingId("")
+      setSuccessMessage("Transfer denied.")
+      setDenyReasonByTransfer((prev) => {
+        const next = { ...prev }
+        delete next[transferId]
+        return next
+      })
+      await loadTransfersPage()
+      setStatusFilter("all")
+      scrollToTransferList()
+    } catch {
+      setErrorMessage("Failed to deny transfer.")
       setActionLoadingId("")
     }
   }
@@ -718,28 +1071,12 @@ export default function TransfersPage() {
       setActionLoadingId("")
       setSuccessMessage("Transfer completed.")
       await loadTransfersPage()
+      setStatusFilter("completed")
+      scrollToTransferList()
     } catch {
       setErrorMessage("Failed to complete transfer.")
       setActionLoadingId("")
     }
-  }
-
-  if (loading) {
-    return (
-      <div>
-        <h1 className="text-3xl font-semibold">Transfers</h1>
-        <p className="mt-4 text-zinc-400">Loading transfers...</p>
-      </div>
-    )
-  }
-
-  if (errorMessage && transfers.length === 0 && tenants.length === 0) {
-    return (
-      <div>
-        <h1 className="text-3xl font-semibold">Transfers</h1>
-        <p className="mt-4 text-red-500">{errorMessage}</p>
-      </div>
-    )
   }
 
   return (
@@ -770,13 +1107,15 @@ export default function TransfersPage() {
         </div>
       </div>
 
+      {loading ? <p className="mt-4 text-zinc-400">Loading transfers...</p> : null}
+
       {successMessage ? (
         <div className="mt-4 rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-300">
           {successMessage}
         </div>
       ) : null}
 
-      {errorMessage && !(errorMessage && transfers.length === 0 && tenants.length === 0) ? (
+      {errorMessage ? (
         <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">
           {errorMessage}
         </div>
@@ -788,8 +1127,167 @@ export default function TransfersPage() {
           {selectedProperty ? selectedProperty.name : "All Properties"}
         </p>
         <p className="mt-2 text-sm text-zinc-500">
-          Transfers are organized by the tenant’s current property.
+          Transfers are visible by current scope. Cross-property transfers appear in either related property.
         </p>
+      </div>
+
+      <div className="mt-8 border-t border-white/10 pt-8">
+        <h1 className="text-5xl font-semibold tracking-tight text-white">
+          What moves need my attention?
+        </h1>
+        <p className="mt-3 text-xl text-zinc-400">
+          Live transfer decisions only. Resolved history stays out of this section.
+        </p>
+
+        <div className="mt-8 space-y-8">
+          {liveAttentionItems.map((item, index) => {
+            const toneClasses =
+              item.level === "high"
+                ? "text-violet-300 border-violet-500/20 bg-violet-500/10"
+                : item.level === "pending"
+                  ? "text-blue-300 border-blue-500/20 bg-blue-500/10"
+                  : "text-red-300 border-red-500/20 bg-red-500/10"
+
+            return (
+              <div
+                key={item.id}
+                className={`grid grid-cols-[72px_1fr_auto] items-center gap-6 border-b border-white/10 pb-8 ${
+                  index === 0 ? "border-t pt-8" : ""
+                }`}
+              >
+                <div className="text-6xl font-semibold tracking-tight text-white">
+                  {index + 1}
+                </div>
+
+                <div>
+                  <div className={`inline-flex rounded-full border px-3 py-1 text-xs uppercase tracking-[0.2em] ${toneClasses}`}>
+                    {item.level === "high"
+                      ? "Needs approval"
+                      : item.level === "pending"
+                        ? "Needs completion"
+                        : "At risk"}
+                  </div>
+
+                  <h2 className="mt-4 text-3xl font-medium tracking-tight text-white">
+                    {item.title}
+                  </h2>
+
+                  <p className="mt-2 text-zinc-400">{item.subtitle}</p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handlePipelineFilter(item.actionFilter)}
+                  className="rounded-full border border-white/10 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
+                >
+                  {item.actionLabel} →
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="mt-8 rounded-2xl border border-white/10 bg-black/30 p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight text-white">Open transfer timelines</h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              See who is leaving, when the destination unit opens, and whether the incoming move actually lines up.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => handlePipelineFilter("all")}
+            className="rounded-full border border-white/10 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
+          >
+            Show all open transfers
+          </button>
+        </div>
+
+        <div className="mt-8 space-y-8">
+          {timelineCards.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-zinc-400">
+              No open transfers right now.
+            </div>
+          ) : (
+            timelineCards.map((card, index) => (
+              <div
+                key={card.transfer.id}
+                className={`grid grid-cols-[72px_1fr] gap-6 border-b border-white/10 pb-8 ${
+                  index === 0 ? "border-t pt-8" : ""
+                }`}
+              >
+                <div className="text-6xl font-semibold tracking-tight text-white">
+                  {index + 1}
+                </div>
+
+                <div>
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <h3 className="text-3xl font-medium tracking-tight text-white">
+                        {card.tenant ? `${card.tenant.first_name} ${card.tenant.last_name}` : "Unknown Tenant"}
+                      </h3>
+                      <p className="mt-2 text-zinc-400">
+                        {card.fromProperty?.name ?? "Unknown Property"} Unit {card.fromUnit?.unit_number ?? "?"}
+                        {" "}→{" "}
+                        {card.toProperty?.name ?? "Unknown Property"} Unit {card.destinationUnit?.unit_number ?? "?"}
+                      </p>
+                    </div>
+
+                    <span className={`rounded-full border px-3 py-1 text-sm capitalize ${getTransferStatusClasses(card.transfer.status)}`}>
+                      {card.transfer.status}
+                    </span>
+                  </div>
+
+                  <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Destination unit now</p>
+                      <p className="mt-3 text-lg text-white">
+                        {card.destinationOccupant
+                          ? `${card.destinationOccupant.first_name} ${card.destinationOccupant.last_name}`
+                          : "No active occupant"}
+                      </p>
+                      <p className="mt-2 text-sm text-zinc-400">
+                        Leaves: {formatDateValue(card.currentOccupantLeaveDate)}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Incoming move</p>
+                      <p className="mt-3 text-lg text-white">
+                        {formatDateValue(card.requestedMoveInDate)}
+                      </p>
+                      <p className="mt-2 text-sm text-zinc-400">
+                        Requested by incoming tenant
+                      </p>
+                    </div>
+
+                    <div className={`rounded-xl border p-4 ${card.toneClasses}`}>
+                      <p className="text-xs uppercase tracking-[0.2em] opacity-80">Result</p>
+                      <p className="mt-3 text-lg font-medium">
+                        {card.resultLabel}
+                      </p>
+                      <p className="mt-2 text-sm opacity-80">
+                        {card.detailLabel}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-6">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Timeline</p>
+                    <div className="mt-3 flex items-center gap-3 text-sm text-zinc-300">
+                      <span>{formatDateValue(card.currentOccupantLeaveDate)}</span>
+                      <div className="h-px flex-1 bg-white/15" />
+                      <span>{formatDateValue(card.requestedMoveInDate)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5">
@@ -803,35 +1301,51 @@ export default function TransfersPage() {
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
-          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
+          <button
+            type="button"
+            onClick={() => handlePipelineFilter("requested")}
+            className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-left hover:bg-amber-500/15"
+          >
             <p className="text-sm text-amber-200">Requested</p>
             <p className="mt-2 text-2xl font-semibold text-white">{pipelineCounts.requested}</p>
             <p className="mt-2 text-xs text-amber-100/80">
               {transfersRequiringReview === 0 ? "No requests waiting" : "Review requests"}
             </p>
-          </div>
+          </button>
 
-          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+          <button
+            type="button"
+            onClick={() => handlePipelineFilter("approved")}
+            className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-left hover:bg-emerald-500/15"
+          >
             <p className="text-sm text-emerald-200">Approved</p>
             <p className="mt-2 text-2xl font-semibold text-white">{pipelineCounts.approved}</p>
             <p className="mt-2 text-xs text-emerald-100/80">
               {approvedNeedingScheduling === 0 ? "Nothing approved" : "Schedule moves"}
             </p>
-          </div>
+          </button>
 
-          <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4">
+          <button
+            type="button"
+            onClick={() => handlePipelineFilter("scheduled")}
+            className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4 text-left hover:bg-blue-500/15"
+          >
             <p className="text-sm text-blue-200">Scheduled</p>
             <p className="mt-2 text-2xl font-semibold text-white">{pipelineCounts.scheduled}</p>
             <p className="mt-2 text-xs text-blue-100/80">
               {scheduledTransfers === 0 ? "Nothing scheduled" : "View timing"}
             </p>
-          </div>
+          </button>
 
-          <div className="rounded-xl border border-zinc-500/20 bg-zinc-500/10 p-4">
+          <button
+            type="button"
+            onClick={() => handlePipelineFilter("completed")}
+            className="rounded-xl border border-zinc-500/20 bg-zinc-500/10 p-4 text-left hover:bg-zinc-500/15"
+          >
             <p className="text-sm text-zinc-200">Completed</p>
             <p className="mt-2 text-2xl font-semibold text-white">{pipelineCounts.completed}</p>
             <p className="mt-2 text-xs text-zinc-300/80">View history</p>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -913,6 +1427,302 @@ export default function TransfersPage() {
           </div>
         </div>
       ) : null}
+            <div
+        id="transfer-list-section"
+        className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-5"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className={`rounded-full border px-4 py-2 text-sm ${
+              statusFilter === "all"
+                ? "border-white/20 bg-white/10 text-white"
+                : "border-zinc-700 bg-black/30 text-zinc-400"
+            }`}
+          >
+            All ({scopedTransfers.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("requested")}
+            className={`rounded-full border px-4 py-2 text-sm ${
+              statusFilter === "requested"
+                ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                : "border-zinc-700 bg-black/30 text-zinc-400"
+            }`}
+          >
+            Requested ({requestedCount})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("approved")}
+            className={`rounded-full border px-4 py-2 text-sm ${
+              statusFilter === "approved"
+                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                : "border-zinc-700 bg-black/30 text-zinc-400"
+            }`}
+          >
+            Approved ({approvedCount})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("scheduled")}
+            className={`rounded-full border px-4 py-2 text-sm ${
+              statusFilter === "scheduled"
+                ? "border-blue-500/20 bg-blue-500/10 text-blue-300"
+                : "border-zinc-700 bg-black/30 text-zinc-400"
+            }`}
+          >
+            Scheduled ({scheduledCount})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("completed")}
+            className={`rounded-full border px-4 py-2 text-sm ${
+              statusFilter === "completed"
+                ? "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
+                : "border-zinc-700 bg-black/30 text-zinc-400"
+            }`}
+          >
+            Completed ({completedCount})
+          </button>
+        </div>
+
+        <div className="mt-6 space-y-4">
+          {filteredTransfers.map((transfer) => {
+            const tenant = tenantMap.get(transfer.tenant_id)
+            const fromProperty = propertyMap.get(transfer.from_property_id)
+            const toProperty = propertyMap.get(transfer.to_property_id)
+            const fromUnit = unitMap.get(transfer.from_unit_id)
+            const toUnit = unitMap.get(transfer.to_unit_id)
+            const stage = getPipelineStage(transfer)
+
+            return (
+              <div
+                key={transfer.id}
+                className="rounded-xl border border-zinc-800 bg-black/30 p-5"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-medium">
+                      {tenant ? `${tenant.first_name} ${tenant.last_name}` : "Unknown Tenant"}
+                    </h2>
+
+                    <p className="mt-2 text-zinc-300">
+                      {fromProperty?.name ?? "Unknown Property"} Unit{" "}
+                      {fromUnit?.unit_number ?? "?"} → {toProperty?.name ?? "Unknown Property"} Unit{" "}
+                      {toUnit?.unit_number ?? "?"}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
+                        Requested: {transfer.requested_date ?? "—"}
+                      </span>
+
+                      {transfer.approved_date ? (
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
+                          Approved: {transfer.approved_date}
+                        </span>
+                      ) : null}
+
+                      {transfer.move_out_date || transfer.move_in_date ? (
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300">
+                          Timing: {transfer.move_out_date ?? "—"} → {transfer.move_in_date ?? "—"}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-3 flex items-center gap-2 text-xs">
+                      <span
+                        className={`rounded-full border px-3 py-1 ${
+                          stage === "requested"
+                            ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                            : stage === "approved"
+                              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                              : stage === "scheduled"
+                                ? "border-blue-500/20 bg-blue-500/10 text-blue-300"
+                                : stage === "completed"
+                                  ? "border-zinc-500/20 bg-zinc-500/10 text-zinc-300"
+                                  : "border-red-500/20 bg-red-500/10 text-red-300"
+                        }`}
+                      >
+                        {stage === "requested"
+                          ? "Review needed"
+                          : stage === "approved"
+                            ? "Ready to schedule"
+                            : stage === "scheduled"
+                              ? "Move timing set"
+                              : stage === "completed"
+                                ? "Completed"
+                                : "Denied"}
+                      </span>
+                    </div>
+
+                    {transfer.notes ? (
+                      <p className="mt-3 text-sm text-zinc-400">{transfer.notes}</p>
+                    ) : null}
+
+                    {transfer.status.toLowerCase() === "cancelled" && transfer.denial_reason ? (
+                      <p className="mt-2 text-sm text-red-300">
+                        Denial reason: {transfer.denial_reason}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-col items-end gap-3">
+                    <div
+                      className={`rounded-full border px-3 py-1 text-sm capitalize ${getTransferStatusClasses(
+                        transfer.status
+                      )}`}
+                    >
+                      {transfer.status}
+                    </div>
+
+                    {transfer.status.toLowerCase() === "requested" ? (
+                      <div className="flex flex-col items-end gap-2">
+                        <select
+                          value={denyReasonByTransfer[transfer.id] ?? ""}
+                          onChange={(e) =>
+                            setDenyReasonByTransfer((prev) => ({
+                              ...prev,
+                              [transfer.id]: e.target.value,
+                            }))
+                          }
+                          className="rounded bg-black p-2 text-sm text-white"
+                        >
+                          <option value="">Select denial reason</option>
+                          <option value="Timing mismatch">Timing mismatch</option>
+                          <option value="Unit not available / not ready">
+                            Unit not available / not ready
+                          </option>
+                          <option value="Better unit option available">
+                            Better unit option available
+                          </option>
+                          <option value="Tenant changed mind">Tenant changed mind</option>
+                          <option value="Lease conflict / too little time remaining">
+                            Lease conflict / too little time remaining
+                          </option>
+                          <option value="Financial / pricing issue">Financial / pricing issue</option>
+                          <option value="Operational conflict">Operational conflict</option>
+                          <option value="Other">Other</option>
+                        </select>
+
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleDenyTransfer(transfer.id)}
+                            disabled={actionLoadingId === transfer.id}
+                            className="rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-700 disabled:opacity-60"
+                          >
+                            {actionLoadingId === transfer.id ? "Denying..." : "Deny Transfer"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setConfirmApproveTransfer(transfer)}
+                            disabled={actionLoadingId === transfer.id}
+                            className="rounded bg-emerald-600 px-3 py-2 text-sm hover:bg-emerald-700 disabled:opacity-60"
+                          >
+                            {actionLoadingId === transfer.id ? "Approving..." : "Approve Transfer"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {transfer.status.toLowerCase() === "approved" ? (
+                      <button
+                        type="button"
+                        onClick={() => handleCompleteTransfer(transfer.id)}
+                        disabled={actionLoadingId === transfer.id}
+                        className="rounded bg-blue-600 px-3 py-2 text-sm hover:bg-blue-700 disabled:opacity-60"
+                      >
+                        {actionLoadingId === transfer.id ? "Completing..." : "Complete Transfer"}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+
+          {filteredTransfers.length === 0 ? (
+            <div className="rounded-xl border border-zinc-800 bg-black/30 p-5 text-zinc-400">
+              No transfers found for this filter.
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+
+      <div className="mt-8 rounded-2xl border border-white/10 bg-black/30 p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight text-white">Resolved history</h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              Completed and cancelled transfers stay here so the live attention sections only show active work.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-8 space-y-4">
+          {transferHistoryCards.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-zinc-400">
+              No resolved transfer history yet.
+            </div>
+          ) : (
+            transferHistoryCards.map((card) => (
+              <div
+                key={card.transfer.id}
+                className="rounded-xl border border-white/10 bg-white/5 p-5"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-xl font-medium text-white">
+                      {card.tenant ? `${card.tenant.first_name} ${card.tenant.last_name}` : "Unknown Tenant"}
+                    </h3>
+                    <p className="mt-2 text-zinc-400">
+                      {card.fromProperty?.name ?? "Unknown Property"} Unit {card.fromUnit?.unit_number ?? "?"}
+                      {" "}→{" "}
+                      {card.toProperty?.name ?? "Unknown Property"} Unit {card.toUnit?.unit_number ?? "?"}
+                    </p>
+                  </div>
+
+                  <span className={`rounded-full border px-3 py-1 text-sm capitalize ${getTransferStatusClasses(card.transfer.status)}`}>
+                    {card.transfer.status}
+                  </span>
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                  <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1">
+                    Requested: {formatDateValue(card.transfer.requested_date)}
+                  </span>
+                  {card.transfer.approved_date ? (
+                    <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1">
+                      Approved: {formatDateValue(card.transfer.approved_date)}
+                    </span>
+                  ) : null}
+                  {card.transfer.move_in_date ? (
+                    <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1">
+                      Move in: {formatDateValue(card.transfer.move_in_date)}
+                    </span>
+                  ) : null}
+                </div>
+
+                {card.transfer.status.toLowerCase() === "cancelled" && card.transfer.denial_reason ? (
+                  <p className="mt-4 text-sm text-red-300">
+                    Denial reason: {card.transfer.denial_reason}
+                  </p>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
 
       <div
         id="create-transfer-form"
@@ -1006,8 +1816,7 @@ export default function TransfersPage() {
                   <p className="mt-1 text-sm text-zinc-100">
                     {getLeaseRiskLabel(selectedTenant.lease_end)}
                   </p>
-                </div>
-
+                </div> 
                 <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                   <p className="text-xs uppercase tracking-wide text-zinc-400">Lease Start</p>
                   <p className="mt-1 text-sm text-zinc-100">
@@ -1172,6 +1981,93 @@ export default function TransfersPage() {
           </button>
         </form>
       </div>
+
+      {confirmApproveTransfer ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-900 p-6">
+            <h2 className="text-lg font-semibold">Confirm Approval</h2>
+
+            <p className="mt-2 text-sm text-zinc-400">
+              Review potential risks before approving this transfer.
+            </p>
+
+            {(() => {
+              const tenant = tenantMap.get(confirmApproveTransfer.tenant_id)
+              const destinationUnit = unitMap.get(confirmApproveTransfer.to_unit_id)
+              const destinationTiming = getTransferDestinationTiming(
+                confirmApproveTransfer,
+                destinationUnit,
+                tenants,
+                transfers
+              )
+              const warnings = getApprovalWarnings(
+                confirmApproveTransfer,
+                tenant,
+                destinationUnit,
+                tenants,
+                transfers
+              )
+
+              return (
+                <>
+                  <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3 text-sm text-zinc-200">
+                    <p>
+                      Destination unit:{" "}
+                      {destinationUnit ? `Unit ${destinationUnit.unit_number}` : "Unknown"}
+                    </p>
+                    <p className="mt-1">
+                      Expected available: {formatShortDate(destinationTiming.expectedDate)}
+                    </p>
+                    <p className="mt-1">
+                      Timing label: {destinationTiming.label}
+                      {destinationTiming.gap !== null ? ` (${destinationTiming.gap} days)` : ""}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 space-y-2">
+                    {warnings.length === 0 ? (
+                      <p className="text-sm text-emerald-300">
+                        No major timing risks detected.
+                      </p>
+                    ) : (
+                      warnings.map((warning, index) => (
+                        <div
+                          key={index}
+                          className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+                        >
+                          {warning}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              )
+            })()}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmApproveTransfer(null)}
+                className="rounded bg-zinc-700 px-4 py-2 text-sm hover:bg-zinc-600"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const id = confirmApproveTransfer.id
+                  setConfirmApproveTransfer(null)
+                  await handleApproveTransfer(id)
+                }}
+                className="rounded bg-emerald-600 px-4 py-2 text-sm hover:bg-emerald-700"
+              >
+                Confirm Approval
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
