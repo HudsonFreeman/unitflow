@@ -31,21 +31,15 @@ type UnitRow = {
   organization_id: string | null
 }
 
-type TransferRow = {
+type AvailableUnitRow = {
   id: string
-  status: string
-  tenant_id: string
-  from_unit_id: string
-  to_unit_id: string
-  move_out_date: string | null
-  move_in_date: string | null
-}
-
-type DestinationUnitOption = UnitRow & {
-  expectedAvailableDate: Date | null
-  gapDays: number | null
-  timingLabel: string
-  timingReason: string
+  unit_number: string
+  property_id: string
+  status: string | null
+  expected_available_date: string | null
+  gap_days: number | null
+  timing_label: string
+  timing_reason: string
 }
 
 function formatDateValue(value?: string | null) {
@@ -68,13 +62,13 @@ function getDateOnlyString(date: Date) {
 
 function parseDate(value?: string | null) {
   if (!value) return null
-  const date = new Date(`${value}T12:00:00`)
-  if (Number.isNaN(date.getTime())) return null
-  return date
-}
 
-function startOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const normalizedValue = value.includes("T") ? value : `${value}T12:00:00`
+  const date = new Date(normalizedValue)
+
+  if (Number.isNaN(date.getTime())) return null
+
+  return date
 }
 
 function addDays(date: Date, days: number) {
@@ -83,186 +77,17 @@ function addDays(date: Date, days: number) {
   return next
 }
 
-function maxDate(dates: Array<Date | null>) {
-  const validDates = dates.filter((date): date is Date => date instanceof Date)
-
-  if (validDates.length === 0) return null
-
-  return validDates.reduce((latest, current) =>
-    current.getTime() > latest.getTime() ? current : latest
-  )
-}
-
-function minDate(dates: Array<Date | null>) {
-  const validDates = dates.filter((date): date is Date => date instanceof Date)
-
-  if (validDates.length === 0) return null
-
-  return validDates.reduce((earliest, current) =>
-    current.getTime() < earliest.getTime() ? current : earliest
-  )
-}
-
-function getTimingGapDays(
-  expectedAvailableDate: Date | null,
-  requestedMoveInDate: string
-) {
-  if (!expectedAvailableDate || !requestedMoveInDate) return null
-
-  const requestedDate = parseDate(requestedMoveInDate)
-  if (!requestedDate) return null
-
-  const available = startOfDay(expectedAvailableDate)
-  const requested = startOfDay(requestedDate)
-
-  return Math.round(
-    (available.getTime() - requested.getTime()) / (1000 * 60 * 60 * 24)
-  )
-}
-
-function getTimingLabel(gapDays: number | null) {
-  if (gapDays === null) return "Unknown timing"
-  if (gapDays < -60) return "Available much earlier"
-  if (gapDays < -14) return "Available earlier"
-  if (gapDays < 0) return "Available slightly early"
-  if (gapDays <= 2) return "Best fit"
-  if (gapDays <= 7) return "Slight delay"
-  if (gapDays <= 21) return "Delayed"
-  return "Too late"
-}
-
-function getExpectedAvailabilityDetails(
-  unit: UnitRow,
-  allTenants: TenantRow[],
-  allTransfers: TransferRow[]
-) {
-  const today = startOfDay(new Date())
-  const unitStatus = (unit.status ?? "").toLowerCase()
-
-  const activeOccupants = allTenants.filter(
-    (tenant) =>
-      tenant.unit_id === unit.id &&
-      !["moved_out", "transferred"].includes((tenant.status ?? "").toLowerCase())
-  )
-
-  const relevantTransfers = allTransfers.filter(
-    (transfer) =>
-      transfer.from_unit_id === unit.id &&
-      ["requested", "approved", "scheduled"].includes(
-        (transfer.status ?? "").toLowerCase()
-      )
-  )
-
-  const occupantLeaseEndDates = activeOccupants.map((tenant) => parseDate(tenant.lease_end))
-  const transferMoveOutDates = relevantTransfers.map((transfer) =>
-    parseDate(transfer.move_out_date)
-  )
-
-  const latestOccupantLeaseEnd = maxDate(occupantLeaseEndDates)
-  const earliestOccupantLeaseEnd = minDate(occupantLeaseEndDates)
-  const latestTransferMoveOut = maxDate(transferMoveOutDates)
-
-  if (unitStatus === "vacant") {
-    return {
-      expectedAvailableDate: today,
-      timingReason: "Unit is currently vacant.",
-    }
-  }
-
-  if (unitStatus === "make_ready") {
-    const makeReadyDate = addDays(today, 7)
-    return {
-      expectedAvailableDate: makeReadyDate,
-      timingReason: "Unit is currently in make-ready status. Estimated 7-day prep window.",
-    }
-  }
-
-  if (unitStatus === "notice") {
-    if (earliestOccupantLeaseEnd) {
-      const leaseEndDay = startOfDay(earliestOccupantLeaseEnd)
-      return {
-        expectedAvailableDate:
-          leaseEndDay.getTime() < today.getTime() ? today : leaseEndDay,
-        timingReason:
-          "Unit is on notice. Availability is based on the current resident’s lease end date.",
-      }
-    }
-
-    if (latestTransferMoveOut) {
-      const moveOutDay = startOfDay(latestTransferMoveOut)
-      return {
-        expectedAvailableDate:
-          moveOutDay.getTime() < today.getTime() ? today : moveOutDay,
-        timingReason: "Unit is on notice. Availability is based on a scheduled move-out.",
-      }
-    }
-
-    return {
-      expectedAvailableDate: addDays(today, 21),
-      timingReason: "Notice unit has no lease or transfer timing, so a fallback estimate is being used.",
-    }
-  }
-
-  if (unitStatus === "occupied") {
-    if (earliestOccupantLeaseEnd) {
-      const leaseEndDay = startOfDay(earliestOccupantLeaseEnd)
-
-      if (leaseEndDay.getTime() < today.getTime()) {
-        return {
-          expectedAvailableDate: today,
-          timingReason:
-            "The recorded lease end date has already passed, so this unit is treated as effectively available.",
-        }
-      }
-
-      return {
-        expectedAvailableDate: leaseEndDay,
-        timingReason:
-          "Unit is currently occupied. Future availability is based on the resident’s lease end date.",
-      }
-    }
-
-    if (latestTransferMoveOut) {
-      const moveOutDay = startOfDay(latestTransferMoveOut)
-      return {
-        expectedAvailableDate:
-          moveOutDay.getTime() < today.getTime() ? today : moveOutDay,
-        timingReason:
-          "Unit is occupied, but a scheduled transfer move-out provides the next known availability date.",
-      }
-    }
-
-    return {
-      expectedAvailableDate: null,
-      timingReason: "Unit is occupied and no reliable release date was found.",
-    }
-  }
-
-  const fallbackDate = maxDate([earliestOccupantLeaseEnd, latestTransferMoveOut])
-
-  return {
-    expectedAvailableDate: fallbackDate
-      ? startOfDay(fallbackDate).getTime() < today.getTime()
-        ? today
-        : startOfDay(fallbackDate)
-      : null,
-    timingReason: fallbackDate
-      ? "Availability is based on the next known lease or transfer timing tied to this unit."
-      : "No reliable availability timing was found for this unit.",
-  }
-}
-
 export default function TenantRequestPage() {
   const [loading, setLoading] = useState(true)
+  const [loadingUnits, setLoadingUnits] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState("")
   const [successMessage, setSuccessMessage] = useState("")
 
   const [tenant, setTenant] = useState<TenantRow | null>(null)
-  const [allTenants, setAllTenants] = useState<TenantRow[]>([])
   const [properties, setProperties] = useState<PropertyRow[]>([])
   const [units, setUnits] = useState<UnitRow[]>([])
-  const [transfers, setTransfers] = useState<TransferRow[]>([])
+  const [availableUnits, setAvailableUnits] = useState<AvailableUnitRow[]>([])
 
   const [selectedPropertyId, setSelectedPropertyId] = useState("")
   const [selectedUnitId, setSelectedUnitId] = useState("")
@@ -310,13 +135,7 @@ export default function TenantRequestPage() {
         return
       }
 
-      const [allTenantsQuery, propertiesQuery, unitsQuery, transfersQuery] = await Promise.all([
-        supabaseClient
-          .from("tenants")
-          .select(
-            "id, first_name, last_name, email, phone, lease_end, property_id, unit_id, status, organization_id"
-          )
-          .eq("organization_id", nextTenant.organization_id),
+      const [propertiesQuery, unitsQuery] = await Promise.all([
         supabaseClient
           .from("properties")
           .select("id, name, organization_id")
@@ -327,18 +146,7 @@ export default function TenantRequestPage() {
           .select("id, unit_number, property_id, status, organization_id")
           .eq("organization_id", nextTenant.organization_id)
           .order("unit_number"),
-        supabaseClient
-          .from("transfers")
-          .select("id, status, tenant_id, from_unit_id, to_unit_id, move_out_date, move_in_date")
-          .eq("organization_id", nextTenant.organization_id)
-          .order("id", { ascending: false }),
       ])
-
-      if (allTenantsQuery.error) {
-        setErrorMessage(allTenantsQuery.error.message)
-        setLoading(false)
-        return
-      }
 
       if (propertiesQuery.error) {
         setErrorMessage(propertiesQuery.error.message)
@@ -352,22 +160,9 @@ export default function TenantRequestPage() {
         return
       }
 
-      if (transfersQuery.error) {
-        setErrorMessage(transfersQuery.error.message)
-        setLoading(false)
-        return
-      }
-
-      const nextAllTenants = (allTenantsQuery.data ?? []) as TenantRow[]
-      const nextProperties = (propertiesQuery.data ?? []) as PropertyRow[]
-      const nextUnits = (unitsQuery.data ?? []) as UnitRow[]
-      const nextTransfers = (transfersQuery.data ?? []) as TransferRow[]
-
       setTenant(nextTenant)
-      setAllTenants(nextAllTenants)
-      setProperties(nextProperties)
-      setUnits(nextUnits)
-      setTransfers(nextTransfers)
+      setProperties((propertiesQuery.data ?? []) as PropertyRow[])
+      setUnits((unitsQuery.data ?? []) as UnitRow[])
 
       const today = new Date()
       const defaultMoveOut = addDays(today, 7)
@@ -382,6 +177,41 @@ export default function TenantRequestPage() {
 
     loadPage()
   }, [])
+
+  useEffect(() => {
+    async function loadAvailableUnits() {
+      setAvailableUnits([])
+      setSelectedUnitId("")
+
+      if (!selectedPropertyId || !moveInDate) return
+
+      setLoadingUnits(true)
+      setErrorMessage("")
+
+      const params = new URLSearchParams({
+        property_id: selectedPropertyId,
+        move_in_date: moveInDate,
+      })
+
+      if (moveOutDate) {
+        params.set("move_out_date", moveOutDate)
+      }
+
+      const response = await fetch(`/api/tenant/available-units?${params.toString()}`)
+      const result = await response.json()
+
+      if (!response.ok) {
+        setErrorMessage(result.error ?? "Failed to load available units.")
+        setLoadingUnits(false)
+        return
+      }
+
+      setAvailableUnits((result.units ?? []) as AvailableUnitRow[])
+      setLoadingUnits(false)
+    }
+
+    loadAvailableUnits()
+  }, [selectedPropertyId, moveInDate, moveOutDate])
 
   const propertyMap = useMemo(
     () => new Map(properties.map((property) => [property.id, property])),
@@ -403,86 +233,8 @@ export default function TenantRequestPage() {
     )
   }, [properties, tenant])
 
-  const scopedUnits = useMemo(() => {
-    if (!tenant?.organization_id) return []
-    return units.filter((unit) => unit.organization_id === tenant.organization_id)
-  }, [units, tenant])
-
-  const scopedTenants = useMemo(() => {
-    if (!tenant?.organization_id) return []
-    return allTenants.filter(
-      (resident) => resident.organization_id === tenant.organization_id
-    )
-  }, [allTenants, tenant])
-
-  const openTransfers = useMemo(() => {
-    return transfers.filter((transfer) =>
-      ["requested", "approved", "scheduled"].includes(
-        (transfer.status ?? "").toLowerCase()
-      )
-    )
-  }, [transfers])
-
-  const destinationUnits = useMemo<DestinationUnitOption[]>(() => {
-    if (!selectedPropertyId || !tenant) return []
-
-    return scopedUnits
-      .filter((unit) => unit.property_id === selectedPropertyId)
-      .filter((unit) => unit.id !== tenant.unit_id)
-      .filter((unit) => !openTransfers.some((transfer) => transfer.to_unit_id === unit.id))
-      .map((unit) => {
-        const details = getExpectedAvailabilityDetails(unit, scopedTenants, transfers)
-        const gapDays = getTimingGapDays(details.expectedAvailableDate, moveInDate)
-
-        return {
-          ...unit,
-          expectedAvailableDate: details.expectedAvailableDate,
-          gapDays,
-          timingLabel: getTimingLabel(gapDays),
-          timingReason: details.timingReason,
-        }
-      })
-      .filter((unit) => {
-        if (!moveInDate) return unit.expectedAvailableDate !== null
-
-        const requestedMoveIn = parseDate(moveInDate)
-        if (!requestedMoveIn || !unit.expectedAvailableDate || unit.gapDays === null) {
-          return false
-        }
-
-        const earliestAcceptableDate = addDays(requestedMoveIn, -45)
-        const latestAcceptableDate = addDays(requestedMoveIn, 30)
-
-        return (
-          startOfDay(unit.expectedAvailableDate).getTime() >=
-            startOfDay(earliestAcceptableDate).getTime() &&
-          startOfDay(unit.expectedAvailableDate).getTime() <=
-            startOfDay(latestAcceptableDate).getTime()
-        )
-      })
-      .sort((a, b) => {
-        if (a.gapDays === null && b.gapDays === null) {
-          return a.unit_number.localeCompare(b.unit_number, undefined, {
-            numeric: true,
-            sensitivity: "base",
-          })
-        }
-
-        if (a.gapDays === null) return 1
-        if (b.gapDays === null) return -1
-
-        const absDifference = Math.abs(a.gapDays) - Math.abs(b.gapDays)
-        if (absDifference !== 0) return absDifference
-
-        return a.unit_number.localeCompare(b.unit_number, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        })
-      })
-  }, [selectedPropertyId, tenant, scopedUnits, openTransfers, scopedTenants, transfers, moveInDate])
-
   const selectedDestinationUnit =
-    destinationUnits.find((unit) => unit.id === selectedUnitId) ?? null
+    availableUnits.find((unit) => unit.id === selectedUnitId) ?? null
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -549,6 +301,7 @@ export default function TenantRequestPage() {
       setSelectedPropertyId("")
       setSelectedUnitId("")
       setReason("")
+      setAvailableUnits([])
 
       const today = new Date()
       const defaultMoveOut = addDays(today, 7)
@@ -557,18 +310,6 @@ export default function TenantRequestPage() {
       setRequestedDate(getDateOnlyString(today))
       setMoveOutDate(getDateOnlyString(defaultMoveOut))
       setMoveInDate(getDateOnlyString(defaultMoveIn))
-
-      if (tenant.organization_id) {
-        const refreshedTransfers = await supabaseClient
-          .from("transfers")
-          .select("id, status, tenant_id, from_unit_id, to_unit_id, move_out_date, move_in_date")
-          .eq("organization_id", tenant.organization_id)
-          .order("id", { ascending: false })
-
-        if (!refreshedTransfers.error) {
-          setTransfers((refreshedTransfers.data ?? []) as TransferRow[])
-        }
-      }
 
       setSubmitting(false)
     } catch {
@@ -590,7 +331,9 @@ export default function TenantRequestPage() {
     return (
       <div className="min-h-screen bg-black p-10 text-white">
         <h1 className="text-4xl">Request a Transfer</h1>
-        <p className="mt-6 text-red-400">{errorMessage || "Tenant record not found."}</p>
+        <p className="mt-6 text-red-400">
+          {errorMessage || "Tenant record not found."}
+        </p>
         <div className="mt-6">
           <Link href="/tenant" className="text-sm text-zinc-300 underline">
             Back to tenant portal
@@ -713,10 +456,7 @@ export default function TenantRequestPage() {
               <input
                 type="date"
                 value={moveInDate}
-                onChange={(e) => {
-                  setMoveInDate(e.target.value)
-                  setSelectedUnitId("")
-                }}
+                onChange={(e) => setMoveInDate(e.target.value)}
                 className="w-full rounded border border-white/10 bg-black p-3 text-white"
               />
             </div>
@@ -728,58 +468,47 @@ export default function TenantRequestPage() {
               <select
                 value={selectedUnitId}
                 onChange={(e) => setSelectedUnitId(e.target.value)}
-                disabled={!selectedPropertyId}
+                disabled={!selectedPropertyId || loadingUnits}
                 className="w-full rounded border border-white/10 bg-black p-3 text-white disabled:opacity-60"
               >
                 <option value="">
                   {!selectedPropertyId
                     ? "Select destination property first"
-                    : destinationUnits.length === 0
-                      ? "No units close to your requested move-in date"
-                      : "Select destination unit"}
+                    : loadingUnits
+                      ? "Loading available units..."
+                      : availableUnits.length === 0
+                        ? "No units available around your preferred move-in date"
+                        : "Select destination unit"}
                 </option>
 
-                {destinationUnits.map((unit) => (
+                {availableUnits.map((unit) => (
                   <option key={unit.id} value={unit.id}>
                     Unit {unit.unit_number} — {formatUnitStatus(unit.status)} | Available:{" "}
-                    {formatDateValue(
-                      unit.expectedAvailableDate
-                        ? unit.expectedAvailableDate.toISOString().slice(0, 10)
-                        : null
-                    )}{" "}
-                    | {unit.timingLabel}
-                    {unit.gapDays !== null && Math.abs(unit.gapDays) <= 60
-                      ? ` (${unit.gapDays} days)`
-                      : ""}
+                    {formatDateValue(unit.expected_available_date)} | {unit.timing_label}
                   </option>
                 ))}
               </select>
             </div>
 
-            {selectedPropertyId && destinationUnits.length > 0 ? (
+            {selectedPropertyId && availableUnits.length > 0 ? (
               <div className="rounded-xl border border-white/10 bg-black/20 p-4">
                 <p className="text-sm font-medium text-zinc-200">
-                  Best visible options for your requested timing
+                  Best units around your preferred move-in date
                 </p>
                 <div className="mt-3 space-y-2">
-                  {destinationUnits.slice(0, 5).map((unit) => (
+                  {availableUnits.slice(0, 5).map((unit) => (
                     <div
                       key={`${unit.id}-preview`}
                       className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
                     >
                       <p>
                         Unit {unit.unit_number} • {formatUnitStatus(unit.status)} • Available{" "}
-                        {formatDateValue(
-                          unit.expectedAvailableDate
-                            ? unit.expectedAvailableDate.toISOString().slice(0, 10)
-                            : null
-                        )}{" "}
-                        • {unit.timingLabel}
-                        {unit.gapDays !== null && Math.abs(unit.gapDays) <= 60
-                          ? ` (${unit.gapDays} days)`
+                        {formatDateValue(unit.expected_available_date)} • {unit.timing_label}
+                        {unit.gap_days !== null && Math.abs(unit.gap_days) <= 60
+                          ? ` (${unit.gap_days} days)`
                           : ""}
                       </p>
-                      <p className="mt-1 text-xs text-zinc-400">{unit.timingReason}</p>
+                      <p className="mt-1 text-xs text-zinc-400">{unit.timing_reason}</p>
                     </div>
                   ))}
                 </div>
@@ -793,22 +522,17 @@ export default function TenantRequestPage() {
                 </p>
                 <p className="mt-2 text-sm text-zinc-100">
                   Unit {selectedDestinationUnit.unit_number} is expected to be available{" "}
-                  {formatDateValue(
-                    selectedDestinationUnit.expectedAvailableDate
-                      ? selectedDestinationUnit.expectedAvailableDate.toISOString().slice(0, 10)
-                      : null
-                  )}
-                  .
+                  {formatDateValue(selectedDestinationUnit.expected_available_date)}.
                 </p>
                 <p className="mt-1 text-sm text-zinc-100">
-                  Match: {selectedDestinationUnit.timingLabel}
-                  {selectedDestinationUnit.gapDays !== null &&
-                  Math.abs(selectedDestinationUnit.gapDays) <= 60
-                    ? ` (${selectedDestinationUnit.gapDays} days from requested move-in)`
+                  Match: {selectedDestinationUnit.timing_label}
+                  {selectedDestinationUnit.gap_days !== null &&
+                  Math.abs(selectedDestinationUnit.gap_days) <= 60
+                    ? ` (${selectedDestinationUnit.gap_days} days from preferred move-in)`
                     : ""}
                 </p>
                 <p className="mt-2 text-xs text-zinc-300">
-                  {selectedDestinationUnit.timingReason}
+                  {selectedDestinationUnit.timing_reason}
                 </p>
               </div>
             ) : null}

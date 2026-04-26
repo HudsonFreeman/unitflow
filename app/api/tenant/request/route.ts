@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase-server"
+import { supabaseAdmin } from "@/lib/supabase-admin"
 
 const OPEN_TRANSFER_STATUSES = ["requested", "approved", "scheduled"]
 
@@ -12,10 +13,15 @@ type TenantRequestBody = {
   reason?: string | null
 }
 
-function isValidDateString(value?: string | null) {
-  if (!value) return true
-  const date = new Date(value)
-  return !Number.isNaN(date.getTime())
+function parseDate(value?: string | null) {
+  if (!value) return null
+
+  const normalizedValue = value.includes("T") ? value : `${value}T12:00:00`
+  const date = new Date(normalizedValue)
+
+  if (Number.isNaN(date.getTime())) return null
+
+  return date
 }
 
 function getDateOnlyString(value?: string | null) {
@@ -23,9 +29,35 @@ function getDateOnlyString(value?: string | null) {
   return value.slice(0, 10)
 }
 
+function isValidDateString(value?: string | null) {
+  if (!value) return true
+  return parseDate(value) !== null
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+function rangesOverlap(
+  startA: Date | null,
+  endA: Date | null,
+  startB: Date | null,
+  endB: Date | null
+) {
+  if (!startA || !startB) return true
+
+  const safeEndA = endA ?? addDays(startA, 14)
+  const safeEndB = endB ?? addDays(startB, 14)
+
+  return startA.getTime() <= safeEndB.getTime() && startB.getTime() <= safeEndA.getTime()
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as TenantRequestBody
+
     const {
       to_property_id,
       to_unit_id,
@@ -61,16 +93,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Move-in date is invalid." }, { status: 400 })
     }
 
-    if (move_out_date && move_in_date) {
-      const moveOut = new Date(move_out_date)
-      const moveIn = new Date(move_in_date)
+    const parsedMoveOut = parseDate(move_out_date)
+    const parsedMoveIn = parseDate(move_in_date)
 
-      if (moveIn.getTime() < moveOut.getTime()) {
-        return NextResponse.json(
-          { error: "Move-in date cannot be before move-out date." },
-          { status: 400 }
-        )
-      }
+    if (parsedMoveOut && parsedMoveIn && parsedMoveIn.getTime() < parsedMoveOut.getTime()) {
+      return NextResponse.json(
+        { error: "Move-in date cannot be before move-out date." },
+        { status: 400 }
+      )
     }
 
     const supabase = await createClient()
@@ -84,14 +114,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 })
     }
 
-    // 🔴 STRICT TENANT CHECK
-    const { data: tenant, error: tenantError } = await supabase
+    const { data: tenant, error: tenantError } = await supabaseAdmin
       .from("tenants")
       .select("id, organization_id, property_id, unit_id, status, lease_end")
       .eq("user_id", user.id)
-      .single()
+      .maybeSingle()
 
-    if (tenantError || !tenant) {
+    if (tenantError) {
+      return NextResponse.json({ error: tenantError.message }, { status: 500 })
+    }
+
+    if (!tenant) {
       return NextResponse.json(
         { error: "Tenant record not found for this login." },
         { status: 404 }
@@ -114,28 +147,59 @@ export async function POST(request: NextRequest) {
 
     const organizationId = tenant.organization_id
 
-    const { data: destinationProperty, error: propertyError } = await supabase
+    const { data: destinationProperty, error: propertyError } = await supabaseAdmin
       .from("properties")
       .select("id, organization_id")
       .eq("id", to_property_id)
       .eq("organization_id", organizationId)
-      .single()
+      .maybeSingle()
 
-    if (propertyError || !destinationProperty) {
+    if (propertyError) {
+      return NextResponse.json({ error: propertyError.message }, { status: 500 })
+    }
+
+    if (!destinationProperty) {
       return NextResponse.json(
         { error: "Destination property not found." },
         { status: 404 }
       )
     }
 
-    const { data: destinationUnit, error: destinationUnitError } = await supabase
+    const isSamePropertyTransfer = tenant.property_id === to_property_id
+
+    if (!isSamePropertyTransfer) {
+      const { data: propertyLink, error: propertyLinkError } = await supabaseAdmin
+        .from("property_links")
+        .select("id")
+        .eq("organization_id", organizationId)
+        .eq("from_property_id", tenant.property_id)
+        .eq("to_property_id", to_property_id)
+        .maybeSingle()
+
+      if (propertyLinkError) {
+        return NextResponse.json({ error: propertyLinkError.message }, { status: 500 })
+      }
+
+      if (!propertyLink) {
+        return NextResponse.json(
+          { error: "Transfers between these properties are not allowed." },
+          { status: 400 }
+        )
+      }
+    }
+
+    const { data: destinationUnit, error: destinationUnitError } = await supabaseAdmin
       .from("units")
       .select("id, property_id, organization_id, status")
       .eq("id", to_unit_id)
       .eq("organization_id", organizationId)
-      .single()
+      .maybeSingle()
 
-    if (destinationUnitError || !destinationUnit) {
+    if (destinationUnitError) {
+      return NextResponse.json({ error: destinationUnitError.message }, { status: 500 })
+    }
+
+    if (!destinationUnit) {
       return NextResponse.json(
         { error: "Destination unit not found." },
         { status: 404 }
@@ -149,24 +213,21 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (
-      !["vacant", "make_ready", "notice"].includes(
-        (destinationUnit.status ?? "").toLowerCase()
-      )
-    ) {
+    const { data: existingTenantTransfer, error: existingTenantTransferError } =
+      await supabaseAdmin
+        .from("transfers")
+        .select("id")
+        .eq("tenant_id", tenant.id)
+        .eq("organization_id", organizationId)
+        .in("status", OPEN_TRANSFER_STATUSES)
+        .maybeSingle()
+
+    if (existingTenantTransferError) {
       return NextResponse.json(
-        { error: "Destination unit is not available." },
-        { status: 400 }
+        { error: existingTenantTransferError.message },
+        { status: 500 }
       )
     }
-
-    const { data: existingTenantTransfer } = await supabase
-      .from("transfers")
-      .select("id")
-      .eq("tenant_id", tenant.id)
-      .eq("organization_id", organizationId)
-      .in("status", OPEN_TRANSFER_STATUSES)
-      .maybeSingle()
 
     if (existingTenantTransfer) {
       return NextResponse.json(
@@ -175,52 +236,110 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { data: existingDestinationTransfer } = await supabase
-      .from("transfers")
-      .select("id")
-      .eq("to_unit_id", to_unit_id)
-      .eq("organization_id", organizationId)
-      .in("status", OPEN_TRANSFER_STATUSES)
-      .maybeSingle()
+    const { data: existingDestinationTransfers, error: existingDestinationTransferError } =
+      await supabaseAdmin
+        .from("transfers")
+        .select("id, move_in_date, move_out_date, status")
+        .eq("to_unit_id", to_unit_id)
+        .eq("organization_id", organizationId)
+        .in("status", OPEN_TRANSFER_STATUSES)
 
-    if (existingDestinationTransfer) {
+    if (existingDestinationTransferError) {
       return NextResponse.json(
-        { error: "That destination unit already has an open transfer assigned." },
+        { error: existingDestinationTransferError.message },
+        { status: 500 }
+      )
+    }
+
+    const requestedWindowStart = parsedMoveIn
+    const requestedWindowEnd = parsedMoveIn ? addDays(parsedMoveIn, 14) : null
+
+    const overlappingDestinationTransfer = (existingDestinationTransfers ?? []).find(
+      (transfer) => {
+        const existingStart = parseDate(transfer.move_in_date)
+        const existingEnd = existingStart ? addDays(existingStart, 14) : null
+
+        return rangesOverlap(
+          requestedWindowStart,
+          requestedWindowEnd,
+          existingStart,
+          existingEnd
+        )
+      }
+    )
+
+    if (overlappingDestinationTransfer) {
+      return NextResponse.json(
+        {
+          error:
+            "That destination unit already has an open transfer during this move-in window.",
+        },
         { status: 400 }
       )
     }
 
-    const { data: destinationOccupant } = await supabase
-      .from("tenants")
-      .select("id, lease_end, status")
-      .eq("unit_id", to_unit_id)
-      .eq("organization_id", organizationId)
-      .neq("id", tenant.id)
-      .not("status", "in", '("moved_out","transferred")')
-      .maybeSingle()
+    const destinationStatus = (destinationUnit.status ?? "").toLowerCase()
 
-    if (destinationOccupant && move_in_date && destinationOccupant.lease_end) {
-      const requestedMoveIn = new Date(move_in_date)
-      const occupantLeaseEnd = new Date(destinationOccupant.lease_end)
+    const { data: activeDestinationOccupants, error: occupantError } =
+      await supabaseAdmin
+        .from("tenants")
+        .select("id, lease_end, status")
+        .eq("unit_id", to_unit_id)
+        .eq("organization_id", organizationId)
+        .neq("id", tenant.id)
+        .not("status", "in", '("moved_out","transferred")')
 
-      if (
-        !Number.isNaN(requestedMoveIn.getTime()) &&
-        !Number.isNaN(occupantLeaseEnd.getTime()) &&
-        occupantLeaseEnd.getTime() > requestedMoveIn.getTime()
-      ) {
+    if (occupantError) {
+      return NextResponse.json({ error: occupantError.message }, { status: 500 })
+    }
+
+    const occupants = activeDestinationOccupants ?? []
+
+    if (["vacant", "make_ready", "notice"].includes(destinationStatus)) {
+      // allowed
+    } else if (destinationStatus === "occupied") {
+      if (!parsedMoveIn) {
         return NextResponse.json(
           {
             error:
-              "That unit is still occupied beyond your requested move-in date.",
+              "Preferred move-in date is required for occupied units with future availability.",
           },
           { status: 400 }
         )
       }
+
+      if (occupants.length === 0) {
+        return NextResponse.json(
+          { error: "Destination unit is occupied but no occupant timing was found." },
+          { status: 400 }
+        )
+      }
+
+      const blockingOccupant = occupants.find((occupant) => {
+        const leaseEnd = parseDate(occupant.lease_end)
+        if (!leaseEnd) return true
+        return leaseEnd.getTime() > parsedMoveIn.getTime()
+      })
+
+      if (blockingOccupant) {
+        return NextResponse.json(
+          {
+            error:
+              "Destination unit is occupied beyond your preferred move-in date.",
+          },
+          { status: 400 }
+        )
+      }
+    } else {
+      return NextResponse.json(
+        { error: "Destination unit is not available." },
+        { status: 400 }
+      )
     }
 
     const noteText = `Tenant request: ${reason.trim()}`
 
-    const { data: insertedTransfer, error: insertError } = await supabase
+    const { data: insertedTransfer, error: insertError } = await supabaseAdmin
       .from("transfers")
       .insert([
         {
@@ -237,6 +356,7 @@ export async function POST(request: NextRequest) {
           move_in_date: getDateOnlyString(move_in_date),
           notes: noteText,
           status: "requested",
+          created_by: user.id,
         },
       ])
       .select("id")

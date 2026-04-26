@@ -3,6 +3,28 @@ import { createClient } from "@/lib/supabase-server"
 
 const OPEN_TRANSFER_STATUSES = ["requested", "approved", "scheduled"]
 
+function toDateOnly(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+}
+
+function daysBetween(start: Date, end: Date) {
+  const msPerDay = 1000 * 60 * 60 * 24
+  return Math.ceil((end.getTime() - start.getTime()) / msPerDay)
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+function formatDate(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -22,6 +44,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    if (!move_in_date) {
+      return NextResponse.json(
+        { error: "Move-in date is required." },
+        { status: 400 }
+      )
+    }
+
     const supabase = await createClient()
 
     const {
@@ -33,7 +62,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 })
     }
 
-    // STAFF-ONLY CHECK
     const { data: membership, error: membershipError } = await supabase
       .from("organization_members")
       .select("id, organization_id")
@@ -78,12 +106,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { data: destinationProperty, error: destinationPropertyError } = await supabase
-      .from("properties")
-      .select("id, organization_id")
-      .eq("id", to_property_id)
-      .eq("organization_id", organizationId)
-      .single()
+    const { data: destinationProperty, error: destinationPropertyError } =
+      await supabase
+        .from("properties")
+        .select("id, organization_id, expected_vacancy_days")
+        .eq("id", to_property_id)
+        .eq("organization_id", organizationId)
+        .single()
 
     if (destinationPropertyError || !destinationProperty) {
       return NextResponse.json(
@@ -94,13 +123,16 @@ export async function POST(request: NextRequest) {
 
     const { data: destinationUnit, error: destinationUnitError } = await supabase
       .from("units")
-      .select("id, organization_id, property_id, status")
+      .select("id, organization_id, property_id, status, monthly_rent")
       .eq("id", to_unit_id)
       .eq("organization_id", organizationId)
       .single()
 
     if (destinationUnitError || !destinationUnit) {
-      return NextResponse.json({ error: "Destination unit not found." }, { status: 404 })
+      return NextResponse.json(
+        { error: "Destination unit not found." },
+        { status: 404 }
+      )
     }
 
     if (destinationUnit.property_id !== to_property_id) {
@@ -110,13 +142,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (
-      !["vacant", "make_ready", "notice"].includes(
-        (destinationUnit.status ?? "").toLowerCase()
-      )
-    ) {
+    const destinationStatus = (destinationUnit.status ?? "").toLowerCase()
+
+    if (!["vacant", "make_ready", "notice"].includes(destinationStatus)) {
       return NextResponse.json(
-        { error: "Destination unit is not available." },
+        { error: "Destination unit is not available for transfer planning." },
         { status: 400 }
       )
     }
@@ -151,6 +181,104 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const today = new Date()
+    const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+    let destinationAvailableDate: Date | null = null
+
+    if (destinationStatus === "vacant") {
+      destinationAvailableDate = todayDateOnly
+    }
+
+    if (destinationStatus === "make_ready") {
+      destinationAvailableDate = addDays(todayDateOnly, 7)
+    }
+
+    const { data: outgoingTransfer } = await supabase
+      .from("transfers")
+      .select("move_out_date")
+      .eq("from_unit_id", to_unit_id)
+      .eq("organization_id", organizationId)
+      .in("status", OPEN_TRANSFER_STATUSES)
+      .not("move_out_date", "is", null)
+      .order("move_out_date", { ascending: true })
+      .limit(1)
+      .maybeSingle()
+
+    if (outgoingTransfer?.move_out_date) {
+      const outgoingDate = toDateOnly(outgoingTransfer.move_out_date)
+      if (outgoingDate) destinationAvailableDate = outgoingDate
+    }
+
+    if (!destinationAvailableDate && ["notice", "occupied"].includes(destinationStatus)) {
+      const { data: currentOccupant } = await supabase
+        .from("tenants")
+        .select("lease_end")
+        .eq("unit_id", to_unit_id)
+        .eq("organization_id", organizationId)
+        .not("status", "in", '("moved_out","transferred")')
+        .order("lease_end", { ascending: true })
+        .limit(1)
+        .maybeSingle()
+
+      const leaseEndDate = toDateOnly(currentOccupant?.lease_end)
+      if (leaseEndDate) destinationAvailableDate = leaseEndDate
+    }
+
+    if (!destinationAvailableDate) {
+      return NextResponse.json(
+        {
+          error:
+            "Destination unit availability is unknown. Add a lease end date or use a vacant/make-ready unit.",
+        },
+        { status: 400 }
+      )
+    }
+
+    const requestedMoveInDate = toDateOnly(move_in_date)
+
+    if (!requestedMoveInDate) {
+      return NextResponse.json(
+        { error: "Move-in date is invalid." },
+        { status: 400 }
+      )
+    }
+
+    if (requestedMoveInDate < destinationAvailableDate) {
+      return NextResponse.json(
+        {
+          error: `This unit is not ready by the selected move-in date. Change move-in date to ${formatDate(
+            destinationAvailableDate
+          )} or later, or choose another unit.`,
+        },
+        { status: 400 }
+      )
+    }
+
+    const expectedVacancyWithoutTransfer =
+      destinationProperty.expected_vacancy_days ?? 14
+
+    const actualVacancyWithTransfer = Math.max(
+      0,
+      daysBetween(destinationAvailableDate, requestedMoveInDate)
+    )
+
+    const vacancyDaysSaved = Math.max(
+      0,
+      expectedVacancyWithoutTransfer - actualVacancyWithTransfer
+    )
+
+    const monthlyRent =
+      destinationUnit.monthly_rent === null ||
+      destinationUnit.monthly_rent === undefined
+        ? null
+        : Number(destinationUnit.monthly_rent)
+
+    const estimatedRevenueSaved =
+      monthlyRent === null
+        ? null
+        : Number(((monthlyRent / 30) * vacancyDaysSaved).toFixed(2))
+
     const { error: insertError } = await supabase.from("transfers").insert([
       {
         organization_id: organizationId,
@@ -165,6 +293,10 @@ export async function POST(request: NextRequest) {
         notes: notes || null,
         status: "requested",
         created_by: user.id,
+        expected_vacancy_days_without_transfer: expectedVacancyWithoutTransfer,
+        expected_vacancy_days_with_transfer: actualVacancyWithTransfer,
+        vacancy_days_saved: vacancyDaysSaved,
+        estimated_revenue_saved: estimatedRevenueSaved,
       },
     ])
 

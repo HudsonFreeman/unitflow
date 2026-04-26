@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import VacancySavingsCard from "@/components/VacancySavingsCard"
 import {
   ALL_PROPERTIES_VALUE,
   getStoredSelectedPropertyId,
@@ -20,6 +21,10 @@ type TransferRow = {
   from_unit_id: string
   to_property_id: string
   to_unit_id: string
+  expected_vacancy_days_without_transfer: number | null
+  expected_vacancy_days_with_transfer: number | null
+  vacancy_days_saved: number | null
+  estimated_revenue_saved: number | null
 }
 
 type TenantRow = {
@@ -40,6 +45,7 @@ type UnitRow = {
   unit_number: string
   property_id: string
   status?: string
+  monthly_rent?: number | null
 }
 
 type Props = {
@@ -167,7 +173,6 @@ export default function TransfersPageClient({
   const selectedTenant =
     scopedTenants.find((tenant) => tenant.id === selectedTenantId) ?? null
 
-  const fromPropertyId = selectedTenant?.property_id ?? ""
   const fromUnitId = selectedTenant?.unit_id ?? ""
 
   const destinationUnits = useMemo(() => {
@@ -416,6 +421,7 @@ export default function TransfersPageClient({
               {destinationUnits.map((unit) => (
                 <option key={unit.id} value={unit.id}>
                   Unit {unit.unit_number} — {formatUnitStatus(unit.status)}
+                  {unit.monthly_rent ? ` — $${unit.monthly_rent}/mo` : ""}
                 </option>
               ))}
             </select>
@@ -501,6 +507,8 @@ export default function TransfersPageClient({
           const toProperty = properties.find((p) => p.id === transfer.to_property_id)
           const fromUnit = units.find((unit) => unit.id === transfer.from_unit_id)
           const toUnit = units.find((unit) => unit.id === transfer.to_unit_id)
+          const toUnitRent =
+            toUnit?.monthly_rent === undefined ? null : toUnit.monthly_rent
 
           return (
             <div key={transfer.id} className="rounded-xl border p-4">
@@ -512,8 +520,9 @@ export default function TransfersPageClient({
 
                   <p className="mt-1 text-sm text-zinc-400">
                     {fromProperty?.name ?? "Unknown Property"} • Unit{" "}
-                    {fromUnit?.unit_number ?? "?"} → {toProperty?.name ?? "Unknown Property"} •
-                    Unit {toUnit?.unit_number ?? "?"}
+                    {fromUnit?.unit_number ?? "?"} →{" "}
+                    {toProperty?.name ?? "Unknown Property"} • Unit{" "}
+                    {toUnit?.unit_number ?? "?"}
                   </p>
 
                   <p className="mt-2 text-sm text-zinc-500">
@@ -548,6 +557,14 @@ export default function TransfersPageClient({
                 >
                   {transfer.status}
                 </span>
+              </div>
+
+              <div className="mt-4">
+                <VacancySavingsCard
+                  saved={transfer.vacancy_days_saved}
+                  revenue={transfer.estimated_revenue_saved}
+                  rent={toUnitRent}
+                />
               </div>
 
               <div className="mt-3 flex gap-2">

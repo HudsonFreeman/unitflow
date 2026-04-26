@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { supabaseClient } from "@/lib/supabase-client"
+import VacancySavingsCard from "@/components/VacancySavingsCard"
 import {
   ALL_PROPERTIES_VALUE,
   getStoredSelectedPropertyId,
@@ -22,6 +23,10 @@ type TransferRow = {
   from_unit_id: string
   to_property_id: string
   to_unit_id: string
+  expected_vacancy_days_without_transfer: number | null
+  expected_vacancy_days_with_transfer: number | null
+  vacancy_days_saved: number | null
+  estimated_revenue_saved: number | null
 }
 
 type TenantRow = {
@@ -45,6 +50,7 @@ type UnitRow = {
   unit_number: string
   property_id: string
   status?: string | null
+  monthly_rent?: number | null
 }
 
 type TimingRiskItem = {
@@ -140,6 +146,10 @@ function formatDateForInput(date: Date) {
   return date.toISOString().slice(0, 10)
 }
 
+function normalizeDateOnly(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+}
+
 function formatShortDate(date: Date | null) {
   if (!date) return "Unknown"
   return date.toLocaleDateString()
@@ -171,7 +181,9 @@ function getExpectedAvailableDate(
   const relatedOpenTransfer = transfers.find(
     (transfer) =>
       transfer.from_unit_id === unit.id &&
-      ["requested", "approved", "scheduled"].includes(transfer.status.toLowerCase()) &&
+      ["requested", "approved", "scheduled"].includes(
+        (transfer.status ?? "").toLowerCase()
+      ) &&
       transfer.move_out_date
   )
 
@@ -180,7 +192,7 @@ function getExpectedAvailableDate(
     if (!Number.isNaN(d.getTime())) return d
   }
 
-  if (status === "notice") {
+  if (status === "notice" || status === "occupied") {
     const tenant = tenants.find(
       (t) =>
         t.unit_id === unit.id &&
@@ -202,6 +214,23 @@ function getTimingLabel(gap: number | null) {
   if (gap < 0) return "Available early"
   if (gap <= 7) return "Slight delay"
   return "Too late"
+}
+
+function getReadableTimingLabel(gap: number | null) {
+  if (gap === null) return "Unknown timing"
+
+  if (gap === 0) return "Best fit — ready on move-in date"
+
+  if (gap > 0 && gap <= 2) {
+    return `Best fit — ready ${gap} day${gap === 1 ? "" : "s"} after move-in`
+  }
+
+  if (gap < 0) {
+    const daysEarly = Math.abs(gap)
+    return `Ready ${daysEarly} day${daysEarly === 1 ? "" : "s"} early`
+  }
+
+  return `Too late — ready ${gap} days after move-in`
 }
 
 function getMoveVsLeaseLabel(moveInDate?: string, leaseEnd?: string | null) {
@@ -232,19 +261,26 @@ function getTransferDestinationTiming(
   const expectedDate = getExpectedAvailableDate(destinationUnit, tenants, transfers)
 
   let gap: number | null = null
+
   if (expectedDate && transfer.move_in_date) {
-    const requestedMoveIn = new Date(transfer.move_in_date)
-    if (!Number.isNaN(requestedMoveIn.getTime())) {
-      gap = Math.round(
-        (expectedDate.getTime() - requestedMoveIn.getTime()) / (1000 * 60 * 60 * 24)
-      )
-    }
+    gap = getDateDiffInDays(transfer.move_in_date, expectedDate.toISOString().slice(0, 10))
+  }
+
+  let label = "Unknown timing"
+
+  if (gap !== null) {
+    if (gap < -14) label = "Available early"
+    else if (gap < 0) label = "Available slightly early"
+    else if (gap <= 2) label = "Best fit"
+    else if (gap <= 7) label = "Slight delay"
+    else if (gap <= 14) label = "Delayed"
+    else label = "Too late"
   }
 
   return {
     expectedDate,
     gap,
-    label: getTimingLabel(gap),
+    label,
   }
 }
 
@@ -436,6 +472,36 @@ export default function TransfersPage() {
     setMoveInDate("")
   }
 
+  function handleDestinationUnitChange(unitId: string) {
+    setSelectedToUnitId(unitId)
+    clearMessages()
+
+    const selectedUnit = destinationUnits.find((unit) => unit.id === unitId)
+
+    if (!selectedUnit?.expectedDate) return
+
+    const expectedDate = normalizeDateOnly(selectedUnit.expectedDate)
+
+    if (!moveInDate) {
+      setMoveInDate(formatDateForInput(expectedDate))
+      setSuccessMessage(
+        `Move-in date set to ${formatShortDate(expectedDate)} because that is when Unit ${selectedUnit.unit_number} is available.`
+      )
+      return
+    }
+
+    const currentMoveInDate = normalizeDateOnly(new Date(moveInDate))
+
+    if (Number.isNaN(currentMoveInDate.getTime())) return
+
+    if (currentMoveInDate < expectedDate) {
+      setMoveInDate(formatDateForInput(expectedDate))
+      setSuccessMessage(
+        `Move-in date updated to ${formatShortDate(expectedDate)} because Unit ${selectedUnit.unit_number} is not available before then.`
+      )
+    }
+  }
+
   function setDefaultTransferDates() {
     const today = new Date()
     const moveOut = new Date(today)
@@ -472,7 +538,7 @@ export default function TransfersPage() {
       supabaseClient
         .from("transfers")
         .select(
-          "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
+          "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id, expected_vacancy_days_without_transfer, expected_vacancy_days_with_transfer, vacancy_days_saved, estimated_revenue_saved"
         )
         .order("created_at", { ascending: false }),
       supabaseClient
@@ -485,7 +551,7 @@ export default function TransfersPage() {
         .order("name"),
       supabaseClient
         .from("units")
-        .select("id, unit_number, property_id, status")
+        .select("id, unit_number, property_id, status, monthly_rent")
         .order("unit_number"),
     ])
 
@@ -644,17 +710,22 @@ export default function TransfersPage() {
         }
       })
       .sort((a, b) => {
-        if (a.gap === null && b.gap === null) {
-          return a.unit_number.localeCompare(b.unit_number, undefined, {
-            numeric: true,
-            sensitivity: "base",
-          })
-        }
-        if (a.gap === null) return 1
-        if (b.gap === null) return -1
+        const aBest = a.gap !== null && Math.abs(a.gap) <= 2
+        const bBest = b.gap !== null && Math.abs(b.gap) <= 2
 
-        const distanceDiff = Math.abs(a.gap) - Math.abs(b.gap)
-        if (distanceDiff !== 0) return distanceDiff
+        if (aBest && !bBest) return -1
+        if (!aBest && bBest) return 1
+
+        if (a.gap !== null && b.gap !== null) {
+          if (a.gap < 0 && b.gap < 0) return Math.abs(a.gap) - Math.abs(b.gap)
+          if (a.gap < 0) return -1
+          if (b.gap < 0) return 1
+
+          if (a.gap > 0 && b.gap > 0) return a.gap - b.gap
+        }
+
+        if (a.gap === null && b.gap !== null) return 1
+        if (a.gap !== null && b.gap === null) return -1
 
         return a.unit_number.localeCompare(b.unit_number, undefined, {
           numeric: true,
@@ -1276,6 +1347,14 @@ export default function TransfersPage() {
                   </div>
 
                   <div className="mt-6">
+                    <VacancySavingsCard
+                      saved={card.transfer.vacancy_days_saved}
+                      revenue={card.transfer.estimated_revenue_saved}
+                      rent={card.destinationUnit?.monthly_rent ?? null}
+                    />
+                  </div>
+
+                  <div className="mt-6">
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Timeline</p>
                     <div className="mt-3 flex items-center gap-3 text-sm text-zinc-300">
                       <span>{formatDateValue(card.currentOccupantLeaveDate)}</span>
@@ -1572,6 +1651,14 @@ export default function TransfersPage() {
                         Denial reason: {transfer.denial_reason}
                       </p>
                     ) : null}
+
+                    <div className="mt-4 max-w-xl">
+                      <VacancySavingsCard
+                        saved={transfer.vacancy_days_saved}
+                        revenue={transfer.estimated_revenue_saved}
+                        rent={toUnit?.monthly_rent ?? null}
+                      />
+                    </div>
                   </div>
 
                   <div className="flex flex-col items-end gap-3">
@@ -1906,7 +1993,7 @@ export default function TransfersPage() {
               className="w-full rounded bg-black p-2"
               required
               value={selectedToUnitId}
-              onChange={(e) => setSelectedToUnitId(e.target.value)}
+              onChange={(e) => handleDestinationUnitChange(e.target.value)}
               disabled={!selectedToPropertyId}
             >
               <option value="">
@@ -1918,10 +2005,12 @@ export default function TransfersPage() {
               </option>
 
               {destinationUnits.map((unit) => (
-                <option key={unit.id} value={unit.id}>
+                <option
+                  key={unit.id}
+                  value={unit.id}
+                >
                   Unit {unit.unit_number} — {formatUnitStatus(unit.status)} | Available:{" "}
-                  {formatShortDate(unit.expectedDate)} | {unit.label}
-                  {unit.gap !== null ? ` (${unit.gap} days)` : ""}
+                  {formatShortDate(unit.expectedDate)} | {getReadableTimingLabel(unit.gap)}
                 </option>
               ))}
             </select>
@@ -1937,8 +2026,7 @@ export default function TransfersPage() {
                     className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200"
                   >
                     Unit {unit.unit_number} • {formatUnitStatus(unit.status)} • Available{" "}
-                    {formatShortDate(unit.expectedDate)} • {unit.label}
-                    {unit.gap !== null ? ` (${unit.gap} days)` : ""}
+                    {formatShortDate(unit.expectedDate)} • {getReadableTimingLabel(unit.gap)}
                   </div>
                 ))}
               </div>
@@ -1953,10 +2041,7 @@ export default function TransfersPage() {
                 {formatShortDate(selectedDestinationUnit.expectedDate)}.
               </p>
               <p className="mt-1 text-sm text-zinc-100">
-                Match: {selectedDestinationUnit.label}
-                {selectedDestinationUnit.gap !== null
-                  ? ` (${selectedDestinationUnit.gap} days from requested move date)`
-                  : ""}
+                Match: {getReadableTimingLabel(selectedDestinationUnit.gap)}
               </p>
             </div>
           ) : null}
@@ -2022,6 +2107,14 @@ export default function TransfersPage() {
                       Timing label: {destinationTiming.label}
                       {destinationTiming.gap !== null ? ` (${destinationTiming.gap} days)` : ""}
                     </p>
+                  </div>
+
+                  <div className="mt-4">
+                    <VacancySavingsCard
+                      saved={confirmApproveTransfer.vacancy_days_saved}
+                      revenue={confirmApproveTransfer.estimated_revenue_saved}
+                      rent={destinationUnit?.monthly_rent ?? null}
+                    />
                   </div>
 
                   <div className="mt-4 space-y-2">
