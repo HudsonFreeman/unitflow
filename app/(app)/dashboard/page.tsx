@@ -46,6 +46,10 @@ type TransferRow = {
   from_unit_id: string
   to_property_id: string
   to_unit_id: string
+  expected_vacancy_days_without_transfer?: number | null
+  expected_vacancy_days_with_transfer?: number | null
+  vacancy_days_saved?: number | null
+  estimated_revenue_saved?: number | null
 }
 
 type ActionItem = {
@@ -119,15 +123,17 @@ function getToneClasses(level: ActionItem["level"]) {
       label: "text-violet-300",
       dot: "bg-violet-500",
       button: "border-violet-500/30 text-violet-300 hover:bg-violet-500/10",
+      card: "border-violet-500/20 bg-violet-500/10",
     }
   }
 
   if (level === "pending") {
     return {
-      number: "text-violet-400",
-      label: "text-violet-300",
-      dot: "bg-violet-500",
-      button: "border-violet-500/30 text-violet-300 hover:bg-violet-500/10",
+      number: "text-blue-400",
+      label: "text-blue-300",
+      dot: "bg-blue-500",
+      button: "border-blue-500/30 text-blue-300 hover:bg-blue-500/10",
+      card: "border-blue-500/20 bg-blue-500/10",
     }
   }
 
@@ -136,6 +142,7 @@ function getToneClasses(level: ActionItem["level"]) {
     label: "text-red-300",
     dot: "bg-red-500",
     button: "border-red-500/30 text-red-300 hover:bg-red-500/10",
+    card: "border-red-500/20 bg-red-500/10",
   }
 }
 
@@ -198,7 +205,7 @@ export default function DashboardPage() {
         supabaseClient
           .from("transfers")
           .select(
-            "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id"
+            "id, status, requested_date, approved_date, move_out_date, move_in_date, notes, denial_reason, tenant_id, from_property_id, from_unit_id, to_property_id, to_unit_id, expected_vacancy_days_without_transfer, expected_vacancy_days_with_transfer, vacancy_days_saved, estimated_revenue_saved"
           )
           .order("created_at", { ascending: false }),
       ])
@@ -299,6 +306,26 @@ export default function DashboardPage() {
     )
   }, [transfers, selectedPropertyId])
 
+  const portfolioStats = useMemo(() => {
+    let totalDays = 0
+    let totalRevenue = 0
+    let count = 0
+
+    for (const transfer of scopedTransfers) {
+      if (getTransferStage(transfer) === "completed") {
+        totalDays += transfer.vacancy_days_saved || 0
+        totalRevenue += transfer.estimated_revenue_saved || 0
+        count++
+      }
+    }
+
+    return {
+      totalDays,
+      totalRevenue,
+      count,
+    }
+  }, [scopedTransfers])
+
   const noticeTenants = useMemo(() => {
     return scopedTenants
       .filter((tenant) => (tenant.status ?? "").toLowerCase() === "notice")
@@ -382,6 +409,10 @@ export default function DashboardPage() {
       )
     : 0
 
+  const vacantUnitsCount = scopedUnits.filter(
+    (unit) => (unit.status ?? "").toLowerCase() === "vacant"
+  ).length
+
   const actionItems: ActionItem[] = useMemo(() => {
     const items: ActionItem[] = []
 
@@ -443,7 +474,7 @@ export default function DashboardPage() {
     return items.slice(0, 3)
   }, [urgentNoticeTenants.length, requestedTransfers.length, riskyTransfers.length])
 
-  const upcomingExpirations = noticeTenants.slice(0, 3)
+  const upcomingExpirations = noticeTenants.slice(0, 5)
 
   const recentActivity: ActivityItem[] = useMemo(() => {
     const items: ActivityItem[] = []
@@ -502,7 +533,7 @@ export default function DashboardPage() {
       })
     }
 
-    return items.slice(0, 4)
+    return items.slice(0, 5)
   }, [scopedTransfers, scopedTenants, tenantMap, unitMap])
 
   if (loading) {
@@ -524,23 +555,23 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black px-8 py-8 text-white">
-      <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-10 xl:grid-cols-[1.7fr_0.9fr]">
-        <section className="border-r border-white/8 pr-0 xl:pr-10">
-          <div className="mb-10 flex flex-wrap items-start justify-between gap-4">
+    <div className="min-h-screen bg-black px-6 py-6 text-white md:px-8">
+      <div className="mx-auto max-w-[1600px] space-y-6">
+        <header className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p className="text-sm uppercase tracking-[0.24em] text-zinc-500">
+              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">
                 {new Date().toLocaleDateString(undefined, {
                   weekday: "short",
                   month: "short",
                   day: "numeric",
                 })}
               </p>
-              <h1 className="mt-8 max-w-4xl text-6xl font-semibold tracking-[-0.06em] text-white md:text-7xl">
-                What should I do right now?
+              <h1 className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white md:text-5xl">
+                Dashboard
               </h1>
-              <p className="mt-6 text-2xl text-zinc-400">
-                You have {actionItems.length} item{actionItems.length === 1 ? "" : "s"} that need your decision.
+              <p className="mt-2 max-w-2xl text-sm text-zinc-400">
+                {selectedPropertyName} command center: savings, transfer decisions, risk, and portfolio movement.
               </p>
             </div>
 
@@ -551,7 +582,7 @@ export default function DashboardPage() {
                   setSelectedPropertyId(e.target.value)
                   setStoredSelectedPropertyId(e.target.value)
                 }}
-                className="border border-white/10 bg-transparent px-4 py-3 text-sm text-white outline-none transition hover:border-white/20"
+                className="rounded-xl border border-white/10 bg-black px-4 py-3 text-sm text-white outline-none transition hover:border-white/20"
               >
                 <option value={ALL_PROPERTIES_VALUE} className="bg-black text-white">
                   All Properties
@@ -565,158 +596,177 @@ export default function DashboardPage() {
 
               <Link
                 href="/transfers"
-                className="border border-violet-500/30 px-4 py-3 text-sm text-violet-300 transition hover:bg-violet-500/10"
+                className="rounded-xl border border-violet-500/30 px-4 py-3 text-sm text-violet-300 transition hover:bg-violet-500/10"
               >
                 Create transfer
               </Link>
             </div>
           </div>
+        </header>
 
-          <div className="space-y-0">
-            {actionItems.map((item, index) => {
-              const tone = getToneClasses(item.level)
-
-              return (
-                <div
-                  key={item.id}
-                  className={`grid grid-cols-[90px_1fr_auto] items-center gap-6 border-b border-white/8 py-10 ${
-                    index === 0 ? "border-t border-white/8" : ""
-                  }`}
-                >
-                  <div className={`text-8xl font-semibold tracking-[-0.08em] ${tone.number}`}>
-                    {item.priorityNumber}
-                  </div>
-
-                  <div>
-                    <div className="flex items-center gap-3">
-                      <span className={`h-2.5 w-2.5 rounded-full ${tone.dot}`} />
-                      <p className={`text-xs uppercase tracking-[0.22em] ${tone.label}`}>
-                        {item.level === "high"
-                          ? "High Priority"
-                          : item.level === "pending"
-                            ? "Pending"
-                            : "At Risk"}
-                      </p>
-                    </div>
-
-                    <h2 className="mt-4 text-4xl font-medium tracking-[-0.04em] text-white">
-                      {item.title}
-                    </h2>
-
-                    <p className="mt-3 text-xl text-zinc-300">{item.subtitle}</p>
-                    <p className="mt-3 text-base text-zinc-500">{item.detail}</p>
-                  </div>
-
-                  <Link
-                    href={item.href}
-                    className={`inline-flex items-center gap-3 border px-5 py-4 text-sm font-medium transition ${tone.button}`}
-                  >
-                    {item.accent}
-                    <span className="text-xl">→</span>
-                  </Link>
-                </div>
-              )
-            })}
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Revenue Protected</p>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white">
+              ${portfolioStats.totalRevenue.toLocaleString(undefined, {
+                maximumFractionDigits: 0,
+              })}
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">Estimated from completed transfers</p>
           </div>
 
-          <div className="mt-10 flex items-center gap-3 text-zinc-500">
-            <span className="inline-block h-1 w-8 bg-violet-500" />
-            {actionItems[0]?.title === "No urgent decisions right now"
-              ? "You're clear. No urgent actions."
-              : "Stay focused on the decision queue."}
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Vacancy Days Saved</p>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white">
+              {portfolioStats.totalDays}
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">Based on expected vacancy baseline</p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Occupancy</p>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white">
+              {occupancy}%
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">{scopedUnits.length} units in scope</p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Completed Transfers</p>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white">
+              {portfolioStats.count}
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">Savings-counted moves</p>
           </div>
         </section>
 
-        <aside className="space-y-10">
-          <section>
-            <div className="mb-6 flex items-start justify-between gap-4">
+        <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_0.75fr]">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-sm uppercase tracking-[0.18em] text-zinc-500">
-                  {selectedPropertyName}
-                </p>
-                <h2 className="mt-2 text-2xl font-medium tracking-[-0.04em] text-white">
-                  Transfer pipeline
+                <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Decision queue</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-white">
+                  What needs attention now
                 </h2>
               </div>
+              <Link href="/transfers" className="text-sm text-violet-300 hover:text-violet-200">
+                Open transfers →
+              </Link>
+            </div>
 
-              <div className="text-right">
-                <p className="text-sm text-zinc-500">Occupancy</p>
-                <p className="mt-1 text-3xl font-semibold tracking-[-0.04em] text-white">
-                  {occupancy}%
-                </p>
+            <div className="space-y-3">
+              {actionItems.map((item) => {
+                const tone = getToneClasses(item.level)
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`rounded-xl border p-4 ${tone.card}`}
+                  >
+                    <div className="grid grid-cols-[48px_1fr_auto] items-center gap-4">
+                      <div className={`text-4xl font-semibold tracking-[-0.06em] ${tone.number}`}>
+                        {item.priorityNumber}
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`h-2 w-2 rounded-full ${tone.dot}`} />
+                          <p className={`text-xs uppercase tracking-[0.18em] ${tone.label}`}>
+                            {item.level === "high"
+                              ? "High Priority"
+                              : item.level === "pending"
+                                ? "Pending"
+                                : "At Risk"}
+                          </p>
+                        </div>
+                        <h3 className="mt-2 text-xl font-medium tracking-[-0.03em] text-white">
+                          {item.title}
+                        </h3>
+                        <p className="mt-1 text-sm text-zinc-300">{item.subtitle}</p>
+                        <p className="mt-1 text-sm text-zinc-500">{item.detail}</p>
+                      </div>
+
+                      <Link
+                        href={item.href}
+                        className={`hidden rounded-xl border px-4 py-3 text-sm font-medium transition md:inline-flex ${tone.button}`}
+                      >
+                        {item.accent}
+                      </Link>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Pipeline</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-white">
+                  Transfer status
+                </h2>
               </div>
             </div>
 
-            <div className="space-y-6">
+            <div className="grid grid-cols-2 gap-3">
               {[
                 {
                   label: "Requested",
                   value: requestedTransfers.length,
-                  sub: "Waiting for review",
-                  active: true,
+                  sub: "Review",
+                  classes: "border-amber-500/20 bg-amber-500/10 text-amber-300",
                 },
                 {
                   label: "Approved",
                   value: approvedTransfers.length,
-                  sub: "Ready to schedule",
-                  active: true,
+                  sub: "Ready",
+                  classes: "border-emerald-500/20 bg-emerald-500/10 text-emerald-300",
                 },
                 {
                   label: "Scheduled",
                   value: scheduledTransfers.length,
-                  sub: "Move-in scheduled",
-                  active: true,
+                  sub: "Move set",
+                  classes: "border-blue-500/20 bg-blue-500/10 text-blue-300",
                 },
                 {
                   label: "Completed",
                   value: completedThisScope.length,
-                  sub: "This scope",
-                  active: false,
+                  sub: "History",
+                  classes: "border-white/10 bg-white/5 text-zinc-300",
                 },
-              ].map((row, index) => (
-                <div key={row.label} className="flex items-start gap-5">
-                  <div className="flex flex-col items-center">
-                    <div
-                      className={`flex h-10 w-10 items-center justify-center rounded-full border ${
-                        row.active
-                          ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                          : "border-white/10 bg-white/5 text-zinc-300"
-                      }`}
-                    >
-                      {index + 1}
-                    </div>
-                    {index < 3 ? <div className="mt-2 h-10 w-px bg-white/10" /> : null}
-                  </div>
-
-                  <div className="flex-1 border-b border-white/8 pb-5">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="text-2xl font-medium tracking-[-0.03em] text-white">
-                          {row.label}
-                        </p>
-                        <p className="mt-2 text-sm text-zinc-500">{row.sub}</p>
-                      </div>
-                      <p className="text-2xl font-semibold tracking-[-0.04em] text-white">
-                        {row.value}
-                      </p>
-                    </div>
-                  </div>
-                </div>
+              ].map((row) => (
+                <Link
+                  key={row.label}
+                  href="/transfers"
+                  className={`rounded-xl border p-4 transition hover:bg-white/10 ${row.classes}`}
+                >
+                  <p className="text-sm">{row.label}</p>
+                  <p className="mt-2 text-3xl font-semibold tracking-[-0.05em] text-white">
+                    {row.value}
+                  </p>
+                  <p className="mt-1 text-xs opacity-80">{row.sub}</p>
+                </Link>
               ))}
             </div>
-          </section>
+          </div>
+        </section>
 
-          <section>
-            <div className="mb-5 flex items-center justify-between gap-4">
-              <h2 className="text-2xl font-medium tracking-[-0.04em] text-white">
-                Upcoming expirations
-              </h2>
+        <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Lease risk</p>
+                <h2 className="mt-2 text-xl font-semibold tracking-[-0.04em] text-white">
+                  Upcoming expirations
+                </h2>
+              </div>
               <Link href="/tenants" className="text-sm text-violet-300 hover:text-violet-200">
                 View all
               </Link>
             </div>
 
-            <div className="space-y-5">
+            <div className="space-y-3">
               {upcomingExpirations.length > 0 ? (
                 upcomingExpirations.map((tenant) => {
                   const unit = unitMap.get(tenant.unit_id)
@@ -726,87 +776,53 @@ export default function DashboardPage() {
                     <Link
                       href="/tenants"
                       key={tenant.id}
-                      className="flex items-start justify-between gap-4 border-b border-white/8 pb-5 transition hover:border-violet-500/20"
+                      className="flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 p-3 transition hover:border-violet-500/20"
                     >
-                      <div className="min-w-[72px]">
+                      <div>
+                        <p className="font-medium text-white">
+                          {tenant.first_name} {tenant.last_name}
+                        </p>
+                        <p className="mt-1 text-sm text-zinc-400">
+                          Unit {unit?.unit_number ?? "?"} • {propertyMap.get(tenant.property_id)?.name ?? "Unknown Property"}
+                        </p>
+                      </div>
+                      <div className="text-right">
                         <p
-                          className={`text-4xl font-semibold tracking-[-0.06em] ${
+                          className={`text-2xl font-semibold tracking-[-0.05em] ${
                             days !== null && days <= 7 ? "text-orange-400" : "text-amber-300"
                           }`}
                         >
                           {days === null ? "—" : days}
                         </p>
-                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-zinc-500">
-                          {days === 1 ? "Day" : "Days"}
+                        <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">
+                          {formatRelativeUrgency(days)}
                         </p>
                       </div>
-
-                      <div className="flex-1">
-                        <p className="text-xl font-medium text-white">
-                          {tenant.first_name} {tenant.last_name}
-                        </p>
-                        <p className="mt-2 text-sm text-zinc-400">
-                          Unit {unit?.unit_number ?? "?"} • {propertyMap.get(tenant.property_id)?.name ?? "Unknown Property"}
-                        </p>
-                      </div>
-
-                      <div className="pt-1 text-zinc-500">→</div>
                     </Link>
                   )
                 })
               ) : (
-                <div className="border-b border-white/8 pb-5 text-zinc-500">
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-500">
                   No notice tenants in this scope.
                 </div>
               )}
             </div>
-          </section>
+          </div>
 
-          <section>
-            <div className="mb-5 flex items-center justify-between gap-4">
-              <h2 className="text-2xl font-medium tracking-[-0.04em] text-white">
-                Recent activity
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="mb-4">
+              <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Portfolio risk</p>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.04em] text-white">
+                Current pressure
               </h2>
-              <Link href="/transfers" className="text-sm text-violet-300 hover:text-violet-200">
-                View all
-              </Link>
             </div>
 
-            <div className="space-y-4">
-              {recentActivity.length > 0 ? (
-                recentActivity.map((item) => (
-                  <div key={item.id} className="flex items-start gap-4 border-b border-white/8 pb-4">
-                    <div
-                      className={`mt-1 flex h-10 w-10 items-center justify-center rounded-full text-sm ${getActivityToneClasses(
-                        item.tone
-                      )}`}
-                    >
-                      •
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <p className="text-base font-medium text-white">{item.label}</p>
-                      <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>
-                    </div>
-
-                    <p className="whitespace-nowrap text-sm text-zinc-500">{item.time}</p>
-                  </div>
-                ))
-              ) : (
-                <div className="border-b border-white/8 pb-5 text-zinc-500">
-                  No recent activity in this scope.
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="border-t border-white/8 pt-6">
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-2 gap-3">
               <Link
                 href="/tenants"
-                className="border border-white/10 px-4 py-4 text-zinc-200 transition hover:border-white/20 hover:bg-white/5"
+                className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 transition hover:bg-amber-500/15"
               >
-                <p className="text-zinc-500">Tenants on notice</p>
+                <p className="text-sm text-amber-200">Tenants on notice</p>
                 <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
                   {noticeTenants.length}
                 </p>
@@ -814,19 +830,77 @@ export default function DashboardPage() {
 
               <Link
                 href="/properties"
-                className="border border-white/10 px-4 py-4 text-zinc-200 transition hover:border-white/20 hover:bg-white/5"
+                className="rounded-xl border border-white/10 bg-white/5 p-4 transition hover:bg-white/10"
               >
-                <p className="text-zinc-500">Vacant units</p>
+                <p className="text-sm text-zinc-400">Vacant units</p>
                 <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
-                  {
-                    scopedUnits.filter((unit) => (unit.status ?? "").toLowerCase() === "vacant")
-                      .length
-                  }
+                  {vacantUnitsCount}
+                </p>
+              </Link>
+
+              <Link
+                href="/transfers"
+                className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 transition hover:bg-red-500/15"
+              >
+                <p className="text-sm text-red-200">Timing risks</p>
+                <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
+                  {riskyTransfers.length}
+                </p>
+              </Link>
+
+              <Link
+                href="/transfers"
+                className="rounded-xl border border-violet-500/20 bg-violet-500/10 p-4 transition hover:bg-violet-500/15"
+              >
+                <p className="text-sm text-violet-200">Open transfers</p>
+                <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
+                  {openTransfers.length}
                 </p>
               </Link>
             </div>
-          </section>
-        </aside>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Activity</p>
+                <h2 className="mt-2 text-xl font-semibold tracking-[-0.04em] text-white">
+                  Recent movement
+                </h2>
+              </div>
+              <Link href="/transfers" className="text-sm text-violet-300 hover:text-violet-200">
+                View all
+              </Link>
+            </div>
+
+            <div className="space-y-3">
+              {recentActivity.length > 0 ? (
+                recentActivity.map((item) => (
+                  <div key={item.id} className="flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div
+                      className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm ${getActivityToneClasses(
+                        item.tone
+                      )}`}
+                    >
+                      •
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-white">{item.label}</p>
+                      <p className="mt-1 truncate text-sm text-zinc-400">{item.detail}</p>
+                    </div>
+
+                    <p className="whitespace-nowrap text-xs text-zinc-500">{item.time}</p>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-500">
+                  No recent activity in this scope.
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   )

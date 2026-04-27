@@ -157,8 +157,12 @@ function formatShortDate(date: Date | null) {
 
 function formatDateValue(value?: string | null) {
   if (!value) return "—"
-  const date = new Date(value)
+
+  const normalizedValue = value.includes("T") ? value : `${value}T12:00:00`
+  const date = new Date(normalizedValue)
+
   if (Number.isNaN(date.getTime())) return value
+
   return date.toLocaleDateString()
 }
 
@@ -375,10 +379,7 @@ function getTransferTimelineSummary(
   const destinationOccupant = getDestinationOccupant(transfer, tenants)
   const destinationUnit = units.find((unit) => unit.id === transfer.to_unit_id)
 
-  const currentOccupantLeaveDate =
-    transfer.move_out_date ||
-    destinationOccupant?.lease_end ||
-    null
+  const currentOccupantLeaveDate = transfer.move_out_date || null
 
   const requestedMoveInDate = transfer.move_in_date || null
 

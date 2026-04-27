@@ -33,7 +33,6 @@ export default function AppLayout({
 
       setUserEmail(user.email ?? "")
 
-      // 🔴 REAL SECURITY CHECK (staff only)
       const { data: membership, error: membershipError } =
         await supabaseClient
           .from("organization_members")
@@ -47,7 +46,6 @@ export default function AppLayout({
       }
 
       if (!membership) {
-        // 🚫 NOT STAFF → block access
         router.replace("/tenant")
         return
       }
@@ -142,6 +140,14 @@ export default function AppLayout({
 
                 <Link href="/transfers" className={getLinkClasses("/transfers")}>
                   <span>Transfers</span>
+                </Link>
+
+                <Link href="/timeline" className={getLinkClasses("/timeline")}>
+                  <span>Calendar</span>
+                </Link>
+
+                <Link href="/settings" className={getLinkClasses("/settings")}>
+                  <span>Settings</span>
                 </Link>
               </nav>
 

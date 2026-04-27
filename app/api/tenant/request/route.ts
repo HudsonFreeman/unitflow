@@ -3,7 +3,12 @@ import { createClient } from "@/lib/supabase-server"
 import { supabaseAdmin } from "@/lib/supabase-admin"
 
 const OPEN_TRANSFER_STATUSES = ["requested", "approved", "scheduled"]
+const DEFAULT_EXPECTED_VACANCY_DAYS = 14
 
+/**
+ * Tenant transfer request body.
+ * These dates are tenant-selected dates and should remain the source of truth.
+ */
 type TenantRequestBody = {
   to_property_id?: string
   to_unit_id?: string
@@ -40,6 +45,14 @@ function addDays(date: Date, days: number) {
   return next
 }
 
+function getDaysBetween(start: Date, end: Date) {
+  const startOnly = new Date(start.getFullYear(), start.getMonth(), start.getDate())
+  const endOnly = new Date(end.getFullYear(), end.getMonth(), end.getDate())
+
+  const diffMs = endOnly.getTime() - startOnly.getTime()
+  return Math.round(diffMs / (1000 * 60 * 60 * 24))
+}
+
 function rangesOverlap(
   startA: Date | null,
   endA: Date | null,
@@ -52,6 +65,43 @@ function rangesOverlap(
   const safeEndB = endB ?? addDays(startB, 14)
 
   return startA.getTime() <= safeEndB.getTime() && startB.getTime() <= safeEndA.getTime()
+}
+
+function calculateVacancySavings({
+  expectedVacancyDays,
+  monthlyRent,
+  moveOutDate,
+  moveInDate,
+}: {
+  expectedVacancyDays: number | null
+  monthlyRent: number | null
+  moveOutDate: Date | null
+  moveInDate: Date | null
+}) {
+  const expectedVacancyDaysWithoutTransfer =
+    expectedVacancyDays ?? DEFAULT_EXPECTED_VACANCY_DAYS
+
+  const actualVacancyDaysWithTransfer =
+    moveOutDate && moveInDate
+      ? Math.max(0, getDaysBetween(moveOutDate, moveInDate))
+      : null
+
+  const vacancyDaysSaved =
+    actualVacancyDaysWithTransfer === null
+      ? null
+      : Math.max(0, expectedVacancyDaysWithoutTransfer - actualVacancyDaysWithTransfer)
+
+  const estimatedRevenueSaved =
+    vacancyDaysSaved === null || monthlyRent === null
+      ? null
+      : Number(((monthlyRent / 30) * vacancyDaysSaved).toFixed(2))
+
+  return {
+    expectedVacancyDaysWithoutTransfer,
+    actualVacancyDaysWithTransfer,
+    vacancyDaysSaved,
+    estimatedRevenueSaved,
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -149,7 +199,7 @@ export async function POST(request: NextRequest) {
 
     const { data: destinationProperty, error: propertyError } = await supabaseAdmin
       .from("properties")
-      .select("id, organization_id")
+      .select("id, organization_id, expected_vacancy_days")
       .eq("id", to_property_id)
       .eq("organization_id", organizationId)
       .maybeSingle()
@@ -190,7 +240,7 @@ export async function POST(request: NextRequest) {
 
     const { data: destinationUnit, error: destinationUnitError } = await supabaseAdmin
       .from("units")
-      .select("id, property_id, organization_id, status")
+      .select("id, property_id, organization_id, status, monthly_rent")
       .eq("id", to_unit_id)
       .eq("organization_id", organizationId)
       .maybeSingle()
@@ -337,6 +387,24 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const monthlyRent =
+      destinationUnit.monthly_rent === null || destinationUnit.monthly_rent === undefined
+        ? null
+        : Number(destinationUnit.monthly_rent)
+
+    const expectedVacancyDays =
+      destinationProperty.expected_vacancy_days === null ||
+      destinationProperty.expected_vacancy_days === undefined
+        ? null
+        : Number(destinationProperty.expected_vacancy_days)
+
+    const savings = calculateVacancySavings({
+      expectedVacancyDays,
+      monthlyRent,
+      moveOutDate: parsedMoveOut,
+      moveInDate: parsedMoveIn,
+    })
+
     const noteText = `Tenant request: ${reason.trim()}`
 
     const { data: insertedTransfer, error: insertError } = await supabaseAdmin
@@ -357,6 +425,12 @@ export async function POST(request: NextRequest) {
           notes: noteText,
           status: "requested",
           created_by: user.id,
+          expected_vacancy_days_without_transfer:
+            savings.expectedVacancyDaysWithoutTransfer,
+          expected_vacancy_days_with_transfer:
+            savings.actualVacancyDaysWithTransfer,
+          vacancy_days_saved: savings.vacancyDaysSaved,
+          estimated_revenue_saved: savings.estimatedRevenueSaved,
         },
       ])
       .select("id")
